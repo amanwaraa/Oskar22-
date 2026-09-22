@@ -2,5 +2,12 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "telegram-bot-oscar",
   "main": "worker.js",
-  "compatibility_date": "2026-09-22"
+  "compatibility_date": "2026-09-22",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "telegram-bot-db",
+      "database_id": "cf18733c-8916-4e35-8186-d93559762105"
+    }
+  ]
 }
