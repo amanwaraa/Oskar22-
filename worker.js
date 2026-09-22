@@ -1,6 +1,8 @@
 const BOT_TOKEN = "8743553964:AAFdDUy2isOSdgvc50ltCDrSVvlK9dOSu2U";
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
+const PORTABLE_FORMAT = 'OSCAR_MZAUTH_V4';
+const WORKER_VERSION = '2.2.0-mzauth-v4';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -12,7 +14,7 @@ export default {
       if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
 
       if (request.method === 'GET' && url.pathname === '/') {
-        return new Response('Oscar Telegram Bot Worker is running ✅', {
+        return new Response(`Oscar Telegram Bot Worker ${WORKER_VERSION} is running ✅`, {
           headers: { 'Content-Type': 'text/plain; charset=UTF-8' }
         });
       }
@@ -32,7 +34,7 @@ export default {
         await ensureD1(env);
         const info = await telegram('getWebhookInfo', {});
         const count = await env.DB.prepare('SELECT COUNT(*) AS count FROM telegram_sessions WHERE active=1').first();
-        return json({ status: 'running', active_sessions: Number(count?.count || 0), webhook: info });
+        return json({ status: 'running', version: WORKER_VERSION, active_sessions: Number(count?.count || 0), webhook: info });
       }
 
       // App -> bot notification. The accounting app calls this after any invoice is created.
@@ -634,7 +636,44 @@ function activationFileAscii(bytes){
   return out.trim();
 }
 
+
+async function sha256Hex(text){
+  const bytes=enc.encode(String(text||''));
+  const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
+  return [...hash].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+function portableUnwrapText(value){
+  const raw=unb64(value),key=enc.encode(ACTIVATION_WRAP_KEY),out=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++)out[i]=raw[i]^key[i%key.length];
+  return dec.decode(out);
+}
+async function unpackPortableActivationFile(text){
+  let box;try{box=JSON.parse(String(text||'').trim())}catch(_){throw new Error('صيغة ملف الدخول الجديدة غير صالحة.');}
+  if(box?.format!==PORTABLE_FORMAT||Number(box?.version)!==4)throw new Error('إصدار ملف الدخول غير مدعوم.');
+  try{
+    const plain=portableUnwrapText(box?.primary?.data||'');
+    const sum=await sha256Hex(plain);
+    if(box?.primary?.checksum&&sum!==String(box.primary.checksum))throw new Error('CHECKSUM');
+    const payload=JSON.parse(plain);
+    if(payload?.app!==APP_TAG)throw new Error('APP');
+    return payload;
+  }catch(primaryError){
+    console.error('MZAUTH_V4_PRIMARY_ERROR',String(primaryError?.message||primaryError));
+    if(box?.recovery?.data){
+      try{return await unpackLegacyActivationFile(box.recovery.data)}catch(recoveryError){
+        console.error('MZAUTH_V4_RECOVERY_ERROR',String(recoveryError?.message||recoveryError));
+      }
+    }
+    throw new Error('تعذر قراءة ملف الدخول الجديد أو أن الملف تالف.');
+  }
+}
 async function unpackActivationFile(text){
+  const clean=String(text||'').trim();
+  if(clean.startsWith('{'))return unpackPortableActivationFile(clean);
+  return unpackLegacyActivationFile(clean);
+}
+
+async function unpackLegacyActivationFile(text){
   // نفس تنسيق oscar-activation-runtime.js في التطبيق المرفق.
   let raw;
   try{raw=unb64(String(text||'').replace(/\s+/g,''))}
