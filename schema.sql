@@ -1,20 +1,22 @@
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id TEXT UNIQUE NOT NULL,
-    name TEXT,
-    phone TEXT,
-    photo_file_id TEXT,
-    photo_url TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS telegram_sessions (
+  chat_id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  company_name TEXT,
+  account_id TEXT,
+  account_name TEXT,
+  account_role TEXT,
+  payload_json TEXT NOT NULL,
+  logged_in_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS user_states (
-    chat_id TEXT PRIMARY KEY,
-    state TEXT NOT NULL DEFAULT 'IDLE',
-    temp_name TEXT,
-    temp_phone TEXT,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS telegram_states (
+  chat_id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL DEFAULT 'IDLE',
+  data_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_chat_id
-ON users(chat_id);
+CREATE INDEX IF NOT EXISTS idx_tg_sessions_company ON telegram_sessions(company_id,active);
+CREATE INDEX IF NOT EXISTS idx_tg_sessions_account ON telegram_sessions(company_id,account_id,active);
