@@ -174,7 +174,10 @@ async function loginFromTelegramDocument(chatId, doc, env) {
     if (!file?.ok || !file.result?.file_path) throw new Error('تعذر تنزيل ملف الدخول من تيليجرام.');
     const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.result.file_path}`);
     if (!res.ok) throw new Error('فشل تنزيل ملف الدخول.');
-    const opaque = (await res.text()).trim();
+    // اقرأ البايتات نفسها كما يفعل التطبيق ولا تعتمد على تحويل HTTP إلى نص.
+    // ملفات .mzauth عبارة عن Base64 ASCII؛ هذا يمنع أي اختلاف ترميز/BOM أثناء تنزيل تيليجرام.
+    const fileBytes = new Uint8Array(await res.arrayBuffer());
+    const opaque = activationFileAscii(fileBytes);
     const payload = await unpackActivationFile(opaque);
     const verified = await verifyActivationPayload(payload);
     if (verified?.account) payload.account = { ...(payload.account || {}), ...verified.account };
@@ -617,8 +620,157 @@ async function getState(chatId,env){const row=await env.DB.prepare('SELECT mode,
 async function setState(chatId,mode,data,env){await env.DB.prepare(`INSERT INTO telegram_states(chat_id,mode,data_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET mode=excluded.mode,data_json=excluded.data_json,updated_at=excluded.updated_at`).bind(chatId,mode,JSON.stringify(data||{}),new Date().toISOString()).run()}
 async function patchState(chatId,fn,env){const s=await getState(chatId,env);const next=fn({...s.data});await setState(chatId,s.mode,next,env);return next}
 
-async function unpackActivationFile(text){const raw=unb64(String(text||'').replace(/\s+/g,''));if(raw.length<90||raw[0]!==0x6d)throw new Error('ملف التفعيل غير صالح.');let o=1;const keySalt=raw.slice(o,o+16);o+=16;const len=(raw[o++]<<8)|raw[o++];if(len<29||o+len+44>raw.length)throw new Error('ملف التفعيل تالف.');const keyBlob=raw.slice(o,o+len);o+=len;let activationKey='';try{activationKey=await aesDecrypt(keyBlob.slice(12),ACTIVATION_WRAP_KEY,keySalt,keyBlob.slice(0,12),220000)}catch(_){throw new Error('تعذر التحقق من ملف التفعيل.')}const payloadSalt=raw.slice(o,o+16);o+=16;const payloadIv=raw.slice(o,o+12);o+=12;const cipher=raw.slice(o);try{const plain=await aesDecrypt(cipher,activationKey,payloadSalt,payloadIv,220000);const payload=JSON.parse(plain);if(payload?.app!==APP_TAG||String(payload.activationKey||'').trim()!==String(activationKey).trim())throw new Error();if(payload.expiresAt&&Date.now()>=new Date(payload.expiresAt).getTime())throw new Error('انتهت صلاحية ملف الدخول.');return payload}catch(e){if(String(e?.message||'').includes('انتهت'))throw e;throw new Error('فشل فك ملف الدخول أو تم العبث به.')}}
-async function verifyActivationPayload(payload){const db=payload.database||{},companyId=String(payload.companyId||payload.tenantId||'');if(!companyId||!db.databaseURL||!db.authToken)throw new Error('ملف الدخول لا يحتوي على قاعدة شركة صالحة.');const base=`oscar/companies/${encodeURIComponent(companyId)}`,access=unwrapRecord(await readExact(db,`${base}/access/company`,true));if(!access)throw new Error('مفتاح الشركة غير مسجل.');if(String(access.companyKey||'').toUpperCase()!==String(payload.companyKey||payload.activationKey||'').toUpperCase())throw new Error('ملف الدخول لا يطابق مفتاح الشركة.');if(access.status!=='active')throw new Error('تم إيقاف مفتاح الشركة.');if(access.endAt&&Date.now()>=new Date(access.endAt).getTime())throw new Error('انتهت مدة تفعيل الشركة.');const account=payload.account||{};if(payload.type==='company-manager'){const row=access.manager;if(!row||row.active===false)throw new Error('حساب مدير الشركة غير متاح.');if(String(row.id||'')!==String(account.id||''))throw new Error('ملف المدير لا يطابق الحساب المسجل.');const fv=String(account.authVersion||''),cur=String(row.authVersion||''),prev=String(row.previousAuthVersion||''),pending=String(row.pendingAuthVersion||'');if(fv!==cur&&!(prev&&fv===prev&&pending))throw new Error('تم إصدار ملف مدير أحدث. استخدم الملف الجديد.');return{access,account:row}}const row=unwrapRecord(await readExact(db,`${base}/d/employees/${encodeURIComponent(String(account.id||''))}`,false));if(!row)throw new Error('الحساب غير موجود في قاعدة الشركة أو لم تتم مزامنته.');if(row.active===false)throw new Error('تم إيقاف هذا الحساب.');if(String(row.authVersion||'')!==String(account.authVersion||''))throw new Error('تم إصدار ملف دخول أحدث لهذا الحساب.');return{access,account:row}}
+
+function activationFileAscii(bytes){
+  // ملف mzauth نص Base64 فقط. نحذف BOM والمسافات وأي CR/LF بشكل صريح.
+  let out='';
+  for(let i=0;i<bytes.length;i++){
+    const c=bytes[i];
+    if(i===0 && c===0xEF && bytes[i+1]===0xBB && bytes[i+2]===0xBF){i+=2;continue;}
+    if(c===9||c===10||c===13||c===32)continue;
+    if(c>127)throw new Error('ملف الدخول يحتوي على ترميز غير متوقع.');
+    out+=String.fromCharCode(c);
+  }
+  return out.trim();
+}
+
+async function unpackActivationFile(text){
+  // نفس تنسيق oscar-activation-runtime.js في التطبيق المرفق.
+  let raw;
+  try{raw=unb64(String(text||'').replace(/\s+/g,''))}
+  catch(_){throw new Error('ملف التفعيل غير صالح.');}
+
+  if(raw.length<90||raw[0]!==0x6d)throw new Error('ملف التفعيل غير صالح.');
+
+  let o=1;
+  const keySalt=raw.slice(o,o+16);o+=16;
+  const len=(raw[o++]<<8)|raw[o++];
+  if(len<29||o+len+44>raw.length)throw new Error('ملف التفعيل تالف.');
+
+  const keyBlob=raw.slice(o,o+len);o+=len;
+
+  let activationKey='';
+  try{
+    activationKey=await aesDecryptCompat(
+      keyBlob.slice(12),
+      ACTIVATION_WRAP_KEY,
+      keySalt,
+      keyBlob.slice(0,12),
+      220000
+    );
+  }catch(err){
+    console.error('MZAUTH_WRAP_DECRYPT_ERROR', String(err?.message||err), {
+      total: raw.length, keyBlobLen: len
+    });
+    throw new Error('تعذر التحقق من ملف التفعيل.');
+  }
+
+  const payloadSalt=raw.slice(o,o+16);o+=16;
+  const payloadIv=raw.slice(o,o+12);o+=12;
+  const cipher=raw.slice(o);
+
+  try{
+    const plain=await aesDecryptCompat(cipher,activationKey,payloadSalt,payloadIv,220000);
+    const payload=JSON.parse(plain);
+    if(payload?.app!==APP_TAG||String(payload.activationKey||'').trim()!==String(activationKey).trim())throw new Error('MISMATCH');
+    return payload;
+  }catch(err){
+    console.error('MZAUTH_PAYLOAD_DECRYPT_ERROR', String(err?.message||err));
+    throw new Error('فشل فك ملف الدخول أو تم العبث به.');
+  }
+}
+
+function accountPath(payload){
+  const companyId=encodeURIComponent(String(payload.companyId||payload.tenantId||''));
+  const base=`oscar/companies/${companyId}`;
+  if(payload.type==='company-manager')return `${base}/access/company`;
+  return `${base}/d/employees/${encodeURIComponent(String(payload.account?.id||''))}`;
+}
+
+async function verifyActivationPayload(payload){
+  // مطابقة منطق verifyPayloadRemote الموجود داخل تطبيق أوسكار نفسه.
+  const db=payload.database||{};
+  const companyId=String(payload.companyId||payload.tenantId||'');
+  if(!companyId||!db.databaseURL||!db.authToken)throw new Error('ملف التفعيل لا يحتوي على قاعدة شركة صالحة.');
+
+  const base=`oscar/companies/${encodeURIComponent(companyId)}`;
+  const accessPath=`${base}/access/company`;
+  let access=unwrapRecord(await readExact(db,accessPath,true));
+
+  if(!access)throw new Error('مفتاح الشركة غير مسجل في قاعدة الشركة.');
+  if(String(access.companyKey||'').toUpperCase()!==String(payload.companyKey||payload.activationKey||'').toUpperCase())throw new Error('ملف التفعيل لا يطابق مفتاح الشركة.');
+  if(access.status!=='active')throw new Error('تم إيقاف مفتاح الشركة من الإدارة العامة.');
+  if(access.endAt&&Date.now()>=new Date(access.endAt).getTime())throw new Error('انتهت مدة تفعيل الشركة.');
+
+  const account=payload.account||{};
+  let verifiedAccount=null;
+
+  if(payload.type==='company-manager'){
+    let row=access.manager;
+    if(!row||row.active===false)throw new Error('حساب مدير الشركة غير متاح.');
+    if(String(row.id||'')!==String(account.id||''))throw new Error('ملف المدير لا يطابق الحساب المسجل.');
+
+    const fileVersion=String(account.authVersion||'');
+    const currentVersion=String(row.authVersion||'');
+    const previousVersion=String(row.previousAuthVersion||'');
+    const pendingVersion=String(row.pendingAuthVersion||'');
+    const policyVersion=Number(row.authPolicyVersion||0);
+
+    if(fileVersion===currentVersion){
+      if(pendingVersion&&pendingVersion===currentVersion){
+        const committed={
+          ...row,
+          previousAuthVersion:'',
+          pendingAuthVersion:'',
+          pendingIssuedAt:'',
+          authPolicyVersion:2,
+          activatedAt:new Date().toISOString(),
+          updatedAt:new Date().toISOString()
+        };
+        const updatedAt=Date.now();
+        const nextAccess={...access,manager:committed,updatedAt};
+        await writeExact(db,accessPath,nextAccess,updatedAt,false);
+        access=nextAccess;
+        row=committed;
+      }
+    }else if(previousVersion&&fileVersion===previousVersion&&pendingVersion){
+      // الملف السابق صالح مؤقتاً حتى يتم استعمال الملف الجديد مرة واحدة.
+    }else if(policyVersion<2){
+      const recovered={
+        ...row,
+        ...account,
+        id:row.id||account.id,
+        active:true,
+        authVersion:fileVersion,
+        previousAuthVersion:'',
+        pendingAuthVersion:'',
+        pendingIssuedAt:'',
+        authPolicyVersion:2,
+        recoveredAt:new Date().toISOString(),
+        updatedAt:new Date().toISOString()
+      };
+      const updatedAt=Date.now();
+      const nextAccess={...access,manager:recovered,updatedAt};
+      await writeExact(db,accessPath,nextAccess,updatedAt,false);
+      access=nextAccess;
+      row=recovered;
+    }else{
+      throw new Error('تم إصدار ملف مدير أحدث. استخدم الملف الجديد.');
+    }
+
+    verifiedAccount=row;
+  }else{
+    const row=unwrapRecord(await readExact(db,accountPath(payload),false));
+    if(!row)throw new Error('الحساب غير موجود في قاعدة الشركة أو لم تتم مزامنته بعد.');
+    if(row.active===false)throw new Error('تم إيقاف هذا الحساب.');
+    if(String(row.authVersion||'')!==String(account.authVersion||''))throw new Error('تم إصدار ملف دخول أحدث لهذا الحساب.');
+    if(payload.type==='representative'&&String(row.role||'')!=='مندوب')throw new Error('الحساب لم يعد مندوباً.');
+    if(payload.type==='branch-manager'&&String(row.role||'')!=='مدير فرع')throw new Error('حساب مدير الفرع غير متاح.');
+    verifiedAccount=row;
+  }
+
+  return {access,online:true,account:JSON.parse(JSON.stringify(verifiedAccount||account))};
+}
 
 function tursoTable(db){return String(db?.table||'oscar_rtdb').trim().replace(/[^a-zA-Z0-9_]/g,'')||'oscar_rtdb'}
 function tursoUrl(db){const u=String(db?.databaseURL||'').trim();if(!u)throw new Error('رابط قاعدة الشركة غير موجود.');return u.replace(/^libsql:\/\//i,'https://').replace(/\/+$/,'')+'/v2/pipeline'}
@@ -626,12 +778,51 @@ function sqlArg(value){if(value==null)return{type:'null'};if(typeof value==='num
 function cell(c){if(!c||c.type==='null')return null;if(c.type==='integer'||c.type==='float'){const n=Number(c.value);return Number.isFinite(n)?n:c.value}return c.value}
 function resultRows(result){const names=(result?.cols||[]).map(c=>c.name);return(result?.rows||[]).map(r=>Object.fromEntries(r.map((c,i)=>[names[i],cell(c)])))}
 async function pipeline(db,statements,timeout=26000){const token=String(db?.authToken||'').trim();if(!token)throw new Error('توكن قاعدة الشركة غير موجود.');const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeout);try{const res=await fetch(tursoUrl(db),{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({requests:[...statements.map(st=>({type:'execute',stmt:{sql:st.sql,args:(st.args||[]).map(sqlArg)}})),{type:'close'}]}),signal:controller.signal});const text=await res.text();if(!res.ok)throw new Error(`Turso HTTP ${res.status}: ${text.slice(0,180)}`);const data=JSON.parse(text);return statements.map((_,i)=>{const item=data?.results?.[i];if(!item||item.type!=='ok')throw new Error(item?.error?.message||'خطأ SQL');return item.response?.result||{cols:[],rows:[]}})}finally{clearTimeout(timer)}}
-async function readExact(db,path,ensure=false){if(ensure)await ensureRemoteSchema(db);const table=tursoTable(db);const[r]=await pipeline(db,[{sql:`SELECT payload,deleted,updated_at FROM ${table} WHERE path=? LIMIT 1`,args:[path]}]);const row=resultRows(r)[0];if(!row||Number(row.deleted)===1)return null;return parseJson(row.payload)}
+function normalizeRemotePath(path){return String(path||'').trim().replace(/\.json(?:\?.*)?$/i,'').replace(/^\/+|\/+$/g,'').replace(/\/{2,}/g,'/')}
+async function readExact(db,path,ensure=false){
+  if(ensure)await ensureRemoteSchema(db);
+  const table=tursoTable(db),p=normalizeRemotePath(path);
+  const[r]=await pipeline(db,[{sql:`SELECT payload,deleted,updated_at FROM ${table} WHERE path=? LIMIT 1`,args:[p]}]);
+  const row=resultRows(r)[0];
+  if(!row||Number(row.deleted)===1)return null;
+  return parseJson(row.payload);
+}
+async function writeExact(db,path,value,updatedAt=Date.now(),deleted=false){
+  await ensureRemoteSchema(db);
+  const table=tursoTable(db),p=normalizeRemotePath(path);
+  await pipeline(db,[{
+    sql:`INSERT INTO ${table}(path,payload,deleted,updated_at) VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET payload=excluded.payload,deleted=excluded.deleted,updated_at=excluded.updated_at`,
+    args:[p,JSON.stringify(value),deleted?1:0,Number(updatedAt)||Date.now()]
+  }]);
+  return true;
+}
 function unwrapRecord(v){if(v&&typeof v==='object'&&Object.prototype.hasOwnProperty.call(v,'v'))return v.deleted?null:v.v;return v}
 function parseJson(v){if(typeof v!=='string')return v;try{return JSON.parse(v)}catch(_){return v}}
-async function derive(password,salt,iterations){const material=await crypto.subtle.importKey('raw',enc.encode(String(password)),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['decrypt'])}
-async function aesDecrypt(cipher,password,salt,iv,iterations){const key=await derive(password,salt,iterations);return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv},key,cipher))}
-function unb64(s){return Uint8Array.from(atob(String(s||'')),c=>c.charCodeAt(0))}
+
+async function deriveAesKeyCompat(password,salt,iterations=220000){
+  const material=await crypto.subtle.importKey('raw',enc.encode(String(password)),'PBKDF2',false,['deriveBits','deriveKey']);
+  try{
+    const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,256);
+    return crypto.subtle.importKey('raw',bits,{name:'AES-GCM'},false,['decrypt']);
+  }catch(firstError){
+    try{
+      return await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['decrypt']);
+    }catch(secondError){
+      console.error('PBKDF2_ERROR',String(firstError?.message||firstError),String(secondError?.message||secondError));
+      throw secondError;
+    }
+  }
+}
+async function aesDecryptCompat(cipher,password,salt,iv,iterations=220000){
+  const key=await deriveAesKeyCompat(password,salt,iterations);
+  const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv,tagLength:128},key,cipher);
+  return dec.decode(plain);
+}
+function unb64(s){
+  const clean=String(s||'').replace(/\s+/g,'');
+  if(!clean)throw new Error('EMPTY_BASE64');
+  return Uint8Array.from(atob(clean),c=>c.charCodeAt(0));
+}
 
 async function searchProducts(payload,text){const q=norm(text);const all=(await readStore(payload,'products')).filter(x=>!x.deletedAt);return all.filter(p=>norm(p.name).includes(q)||norm(p.internalCode||p.sku).includes(q)||(p.units||[]).some(u=>(u.barcodes||[]).some(b=>String(b).includes(text)))).slice(0,30)}
 function defaultSalePrice(p){const us=Array.isArray(p.units)?p.units:[];const u=us.find(x=>x.isDefaultSale)||us.find(x=>String(x.id)===String(p.baseUnitId))||us[0];return num(u?.salePrice||p.salePrice)}
