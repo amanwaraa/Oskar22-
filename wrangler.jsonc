@@ -9,5 +9,10 @@
       "database_name": "telegram-bot-db",
       "database_id": "cf18733c-8916-4e35-8186-d93559762105"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  }
 }
