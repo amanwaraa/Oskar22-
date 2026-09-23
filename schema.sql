@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_store_orders_status ON store_orders(status,create
 CREATE INDEX IF NOT EXISTS idx_store_products_active ON store_products(active,sort_order);
 CREATE INDEX IF NOT EXISTS idx_store_payments_active ON store_payment_methods(active,sort_order);
 
--- Oscar Cashier SaaS v5
+-- Oscar Accounting SaaS v5.1
 CREATE TABLE IF NOT EXISTS saas_accounts (
   id TEXT PRIMARY KEY,
   owner_chat_id TEXT NOT NULL UNIQUE,
@@ -145,3 +145,18 @@ CREATE INDEX IF NOT EXISTS idx_saas_orders_status ON saas_subscription_orders(st
 CREATE INDEX IF NOT EXISTS idx_pos_products_account ON pos_products(account_id,name);
 CREATE INDEX IF NOT EXISTS idx_pos_sales_account ON pos_sales(account_id,created_at);
 CREATE INDEX IF NOT EXISTS idx_pos_purchases_account ON pos_purchases(account_id,created_at);
+
+-- Oscar Accounting v5.1
+CREATE TABLE IF NOT EXISTS pos_vouchers (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  voucher_no TEXT NOT NULL,
+  voucher_type TEXT NOT NULL,
+  party_type TEXT,
+  party_id TEXT,
+  party_name TEXT,
+  amount REAL NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pos_vouchers_account ON pos_vouchers(account_id,created_at);

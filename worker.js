@@ -1,5 +1,5 @@
 const DEFAULT_BOT_TOKEN = "8743553964:AAFdDUy2isOSdgvc50ltCDrSVvlK9dOSu2U";
-const BOT_VERSION = '5.0.0-oscar-store-cashier-saas';
+const BOT_VERSION = '5.1.0-oscar-accounting-saas-visible';
 const CASHIER_PRODUCT_ID = 'saas_cashier_bot';
 const MASTER_TURSO_URL = 'libsql://mezan-homworkhhh76-rgb.aws-ap-northeast-1.turso.io';
 const DEFAULT_MASTER_TURSO_TOKEN = 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgyMzU2OTIsImlkIjoiMDFhMDViMjctMWMwMS03YWNiLTlkZDUtNzc0YjBmZjhjMDEzIiwia2lkIjoicVgzS01DZ0pwQnp3eGo1Tzl2SHhaWUJGem9sTWFsa24tTU5JOTRlMTl6YyIsInJpZCI6IjVkNjRiOWQxLTVmOTAtNGVhNC04N2NkLTY4MGJjYjUzZGViMyJ9.UCbYQXjam0ax427SR6oBjy-vtjGl2XCVoBFIa6CSt-M4zhkTldObEcfTonAB3rVxx2T0KJun8z9C2DzhK0zsDA';
@@ -66,7 +66,8 @@ async function setupWebhook(origin, env){
     {command:'start',description:'فتح متجر أوسكار'},
     {command:'shop',description:'تصفح البرامج'},
     {command:'orders',description:'طلباتي'},
-    {command:'cashier',description:'حساب أوسكار كاشير'},
+    {command:'cashier',description:'فتح أوسكار المحاسبي'},
+    {command:'accounting',description:'برنامج أوسكار المحاسبي'},
     {command:'admin',description:'لوحة الإدارة'},
   ]}) : {ok:false};
   return {webhookUrl,bot,webhook,commands};
@@ -235,16 +236,25 @@ async function ensureDb(env){
       id TEXT PRIMARY KEY, account_id TEXT NOT NULL, kind TEXT NOT NULL,
       amount REAL NOT NULL, ref_id TEXT, note TEXT, created_at TEXT NOT NULL
     )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS pos_vouchers (
+      id TEXT PRIMARY KEY, account_id TEXT NOT NULL, voucher_no TEXT NOT NULL,
+      voucher_type TEXT NOT NULL, party_type TEXT, party_id TEXT, party_name TEXT,
+      amount REAL NOT NULL, note TEXT, created_at TEXT NOT NULL
+    )`),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_saas_orders_status ON saas_subscription_orders(status,created_at)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pos_products_account ON pos_products(account_id,name)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pos_sales_account ON pos_sales(account_id,created_at)'),
-    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pos_purchases_account ON pos_purchases(account_id,created_at)')
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pos_purchases_account ON pos_purchases(account_id,created_at)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pos_vouchers_account ON pos_vouchers(account_id,created_at)')
   ]);
   const cfg = await env.DB.prepare('SELECT id FROM store_config WHERE id=1').first();
   if(!cfg) await env.DB.prepare(`INSERT INTO store_config(id,store_name,welcome_text,support_username,owner_username,owner_chat_id,banner_file_id,updated_at) VALUES(1,?,?,?,?,?,?,?)`)
     .bind('متجر أوسكار البرمجي','اختر البرنامج المناسب لك وادفع بالطريقة التي تناسبك، ثم أرسل إثبات الدفع وسيتم مراجعة طلبك.',DEFAULT_ADMIN_USERNAME,DEFAULT_ADMIN_USERNAME,null,null,now()).run();
   const t=now();
-  await env.DB.prepare(`INSERT OR IGNORE INTO store_products(id,name,description,price,currency,photo_file_id,delivery_text,active,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,NULL,?,1,-100,?,?)`).bind(CASHIER_PRODUCT_ID,'أوسكار كاشير بوت','نظام كاشير ومخزون وعملاء وموردين ومشتريات ومصروفات وتقارير يعمل بالكامل داخل تيليجرام. جرّبه مجاناً 24 ساعة ثم اشترك بالمدة التي تناسبك.',0,'حسب الخطة','ابدأ التجربة من زر حساب الكاشير.',t,t).run();
+  await env.DB.prepare(`INSERT INTO store_products(id,name,description,price,currency,photo_file_id,delivery_text,active,sort_order,created_at,updated_at)
+    VALUES(?,?,?,?,?,NULL,?,1,-100,?,?)
+    ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,price=excluded.price,currency=excluded.currency,delivery_text=excluded.delivery_text,active=1,sort_order=-100,updated_at=excluded.updated_at`)
+    .bind(CASHIER_PRODUCT_ID,'أوسكار المحاسبي — Telegram ERP/POS','برنامج محاسبة وتشغيل كامل داخل تيليجرام: كاشير ومبيعات ومشتريات ومخزون وأصناف وعملاء وموردون وحسابات وصندوق وسندات قبض وصرف ومصروفات وتقارير. تجربة مجانية 24 ساعة، وبعدها اشتراك بالمدة والسعر الذي تحدده الإدارة.',0,'حسب الخطة','أنشئ حسابك وابدأ تجربة أوسكار المحاسبي لمدة 24 ساعة.',t,t).run();
   await env.DB.prepare(`INSERT OR IGNORE INTO saas_plans(id,name,days,price,currency,active,sort_order,created_at,updated_at) VALUES('plan_month','اشتراك شهر',30,0,'₪',1,10,?,?)`).bind(t,t).run();
   await env.DB.prepare(`INSERT OR IGNORE INTO saas_plans(id,name,days,price,currency,active,sort_order,created_at,updated_at) VALUES('plan_year','اشتراك سنة',365,0,'₪',1,20,?,?)`).bind(t,t).run();
 }
@@ -268,8 +278,8 @@ async function setState(env, chatId, mode='IDLE', data={}){
 }
 async function clearState(env,chatId){ await setState(env,chatId,'IDLE',{}); }
 
-function userKeyboard(){ return {keyboard:[[{text:'🛍 تصفح البرامج'},{text:'💼 حساب الكاشير'}],[{text:'📦 طلباتي'},{text:'💳 طرق الدفع'}],[{text:'☎️ الدعم'}]],resize_keyboard:true,is_persistent:true}; }
-function adminKeyboard(){ return {keyboard:[[{text:'🛡 لوحة الإدارة'},{text:'🛍 واجهة المتجر'}],[{text:'📦 البرامج'},{text:'💳 طرق الدفع'}],[{text:'🧾 الطلبات'},{text:'💵 طلبات الاشتراك'}],[{text:'💎 خطط الاشتراك'},{text:'👤 حسابات الكاشير'}],[{text:'🏢 الشركات'},{text:'⚙️ إعدادات المتجر'}]],resize_keyboard:true,is_persistent:true}; }
+function userKeyboard(){ return {keyboard:[[{text:'🧮 أوسكار المحاسبي'},{text:'🛍 تصفح البرامج'}],[{text:'📦 طلباتي'},{text:'💳 طرق الدفع'}],[{text:'☎️ الدعم'}]],resize_keyboard:true,is_persistent:true}; }
+function adminKeyboard(){ return {keyboard:[[{text:'🛡 لوحة الإدارة'},{text:'🛍 واجهة المتجر'}],[{text:'🧮 فتح البرنامج المحاسبي'},{text:'📦 البرامج'}],[{text:'💳 طرق الدفع'},{text:'🧾 الطلبات'}],[{text:'💵 طلبات الاشتراك'},{text:'💎 خطط الاشتراك'}],[{text:'👤 حسابات المحاسبة'},{text:'🏢 الشركات'}],[{text:'⚙️ إعدادات المتجر'}]],resize_keyboard:true,is_persistent:true}; }
 function cancelKeyboard(isAdmin=false){ return {keyboard:[[{text:'❌ إلغاء'}],[{text:isAdmin?'🛡 لوحة الإدارة':'🏠 الرئيسية'}]],resize_keyboard:true}; }
 function ik(rows){ return {inline_keyboard:rows}; }
 
@@ -296,10 +306,11 @@ async function processUpdate(update,env){
   const admin=await isAdmin(env,chatId,msg.from);
   const text=String(msg.text||'').trim();
 
-  if(text==='/start'||text==='🏠 الرئيسية'||text==='🛍 واجهة المتجر') return showHome(env,chatId,msg.from,admin);
+  if(text==='/start'||text==='🏠 الرئيسية') return showHome(env,chatId,msg.from,admin);
+  if(text==='🛍 واجهة المتجر') return showStorefront(env,chatId,msg.from);
   if(text==='/shop'||text==='🛍 تصفح البرامج') return showProducts(env,chatId,0,admin);
   if(text==='/orders'||text==='📦 طلباتي') return showMyOrders(env,chatId,admin);
-  if(text==='/cashier'||text==='💼 حساب الكاشير') return openCashierAccount(env,chatId,msg.from);
+  if(text==='/cashier'||text==='/accounting'||text==='💼 حساب الكاشير'||text==='🧮 أوسكار المحاسبي'||text==='🧮 فتح البرنامج المحاسبي') return openCashierAccount(env,chatId,msg.from);
   if(text==='💎 الاشتراك') return showSubscriptionPlans(env,chatId);
   if(text==='🚪 خروج الكاشير') return logoutCashier(env,chatId,msg.from);
   if(text==='🧾 بيع') return posStartSale(env,chatId);
@@ -307,9 +318,12 @@ async function processUpdate(update,env){
   if(text==='👥 العملاء') return posCustomers(env,chatId);
   if(text==='🚚 الموردون') return posSuppliers(env,chatId);
   if(text==='🛒 مشتريات') return posStartPurchase(env,chatId);
-  if(text==='💸 مصروف') return posStartExpense(env,chatId);
-  if(text==='💰 الصندوق') return posCash(env,chatId);
-  if(text==='📊 تقرير اليوم') return posDailyReport(env,chatId);
+  if(text==='💸 مصروف'||text==='💸 المصروفات') return posStartExpense(env,chatId);
+  if(text==='💰 الصندوق'||text==='💼 الحسابات') return posAccounts(env,chatId);
+  if(text==='📚 المخزون') return posInventorySummary(env,chatId);
+  if(text==='🧾 سند قبض') return posStartVoucher(env,chatId,'receipt');
+  if(text==='💸 سند صرف') return posStartVoucher(env,chatId,'payment');
+  if(text==='📊 تقرير اليوم'||text==='📊 التقارير') return posReportsMenu(env,chatId);
 
   if(text==='💳 طرق الدفع' && !admin) return showPaymentMethods(env,chatId,false);
   if(text==='☎️ الدعم') return showSupport(env,chatId,admin);
@@ -319,7 +333,7 @@ async function processUpdate(update,env){
   if(text==='🧾 الطلبات' && admin) return adminOrders(env,chatId);
   if(text==='⚙️ إعدادات المتجر' && admin) return adminSettings(env,chatId);
   if(text==='💎 خطط الاشتراك' && admin) return adminPlans(env,chatId);
-  if(text==='👤 حسابات الكاشير' && admin) return adminSaasAccounts(env,chatId);
+  if((text==='👤 حسابات الكاشير'||text==='👤 حسابات المحاسبة') && admin) return adminSaasAccounts(env,chatId);
   if(text==='🏢 الشركات' && admin) return adminSaasAccounts(env,chatId,true);
   if(text==='💵 طلبات الاشتراك' && admin) return adminSubscriptionOrders(env,chatId);
 
@@ -346,13 +360,27 @@ async function isAdmin(env,chatId,from){
 
 async function showHome(env,chatId,from,admin=false){
   await clearState(env,chatId);
-  const cfg=await getConfig(env); const name=e(from?.first_name||'صديقي');
-  const text=`👋 <b>أهلاً ${name}</b>\n\n<b>${e(cfg.store_name)}</b>\n${e(cfg.welcome_text)}\n\n✨ اختر من الأزرار أسفل الشاشة.`;
-  const kb=admin?adminKeyboard():userKeyboard();
-  if(cfg.banner_file_id) return sendPhoto(env,chatId,cfg.banner_file_id,text,ik([[{text:'🛍 تصفح البرامج',callback_data:'shop:0'}],[{text:'💬 الدعم',url:`https://t.me/${cleanUsername(cfg.support_username||DEFAULT_ADMIN_USERNAME)}`}]]));
-  return sendMessage(env,chatId,text,kb);
+  if(admin) return showAdminHome(env,chatId);
+  return showStorefront(env,chatId,from);
 }
 
+async function showStorefront(env,chatId,from){
+  await clearState(env,chatId);
+  const cfg=await getConfig(env); const name=e(from?.first_name||'صديقي');
+  const text=`👋 <b>أهلاً ${name}</b>
+
+<b>${e(cfg.store_name)}</b>
+${e(cfg.welcome_text)}
+
+🧮 <b>أوسكار المحاسبي</b> متاح الآن: تجربة مجانية 24 ساعة ثم اشتراك بالمدة التي تختارها.
+
+اختر من الأزرار أسفل الشاشة.`;
+  if(cfg.banner_file_id){
+    await sendPhoto(env,chatId,cfg.banner_file_id,text,ik([[{text:'فتح أوسكار المحاسبي',callback_data:'saas:landing'}],[{text:'تصفح البرامج',callback_data:'shop:0'}],[{text:'الدعم',url:`https://t.me/${cleanUsername(cfg.support_username||DEFAULT_ADMIN_USERNAME)}`}]]));
+    return sendMessage(env,chatId,'⌨️ القائمة الرئيسية:',userKeyboard());
+  }
+  return sendMessage(env,chatId,text,userKeyboard());
+}
 async function showProducts(env,chatId,index=0,admin=false){
   const rows=await env.DB.prepare('SELECT * FROM store_products WHERE active=1 ORDER BY sort_order ASC, created_at ASC').all();
   const products=rows.results||[];
@@ -479,6 +507,10 @@ async function handleCallback(env,chatId,data,q){
   if(data.startsWith('saas:plan:')) return beginSaasPlanPurchase(env,chatId,data.slice(10));
   if(data.startsWith('saas:pay:')){ const parts=data.split(':'); return showSaasCheckout(env,chatId,parts[2],parts[3]); }
   if(data.startsWith('saas:proof:')){ const parts=data.split(':'); await setState(env,chatId,'SAAS_AWAIT_PROOF',{plan_id:parts[2],payment_method_id:parts[3]}); return sendMessage(env,chatId,'📸 <b>أرسل الآن صورة إثبات دفع الاشتراك</b>\n\nسيصل الطلب للإدارة للمراجعة.',cancelKeyboard(false)); }
+  if(data==='pos:report:today') return posDailyReport(env,chatId);
+  if(data==='pos:report:sales') return posRecentSales(env,chatId);
+  if(data==='pos:report:purchases') return posRecentPurchases(env,chatId);
+  if(data==='pos:report:balances') return posBalances(env,chatId);
   if(data.startsWith('pos:customer:')) return posSaleChooseCustomer(env,chatId,data.slice(13));
   if(data.startsWith('pos:add:')) return posSaleAdd(env,chatId,data.slice(8),1);
   if(data.startsWith('pos:sub:')) return posSaleAdd(env,chatId,data.slice(8),-1);
@@ -538,7 +570,7 @@ async function showAdminHome(env,chatId){
   const pending=await env.DB.prepare("SELECT COUNT(*) c FROM store_orders WHERE status='pending'").first();
   const sp=await env.DB.prepare("SELECT COUNT(*) c FROM saas_subscription_orders WHERE status='pending'").first();
   const ac=await env.DB.prepare('SELECT COUNT(*) c FROM saas_accounts').first();
-  return sendMessage(env,chatId,`🛡 <b>لوحة إدارة ${e(cfg.store_name)}</b>\n\n🧾 طلبات برامج: <b>${Number(pending?.c||0)}</b>\n💵 طلبات اشتراك: <b>${Number(sp?.c||0)}</b>\n🏢 شركات الكاشير: <b>${Number(ac?.c||0)}</b>\n\nاختر القسم من الأزرار أسفل الشاشة.`,adminKeyboard());
+  return sendMessage(env,chatId,`🛡 <b>لوحة إدارة ${e(cfg.store_name)}</b>\n\n🧾 طلبات برامج: <b>${Number(pending?.c||0)}</b>\n💵 طلبات اشتراك: <b>${Number(sp?.c||0)}</b>\n🏢 شركات المحاسبة: <b>${Number(ac?.c||0)}</b>\n\nاختر القسم من الأزرار أسفل الشاشة.`,adminKeyboard());
 }
 async function adminProducts(env,chatId){
   const rows=await env.DB.prepare('SELECT * FROM store_products ORDER BY sort_order ASC,created_at DESC').all();
@@ -672,9 +704,9 @@ async function handleState(env,chatId,msg,state,admin){
 
 
 // =========================
-// Oscar Cashier SaaS v5.0
+// Oscar Accounting SaaS v5.1
 // =========================
-function cashierKeyboard(){ return {keyboard:[[{text:'🧾 بيع'},{text:'📦 الأصناف'}],[{text:'👥 العملاء'},{text:'🚚 الموردون'}],[{text:'🛒 مشتريات'},{text:'💸 مصروف'}],[{text:'💰 الصندوق'},{text:'📊 تقرير اليوم'}],[{text:'💎 الاشتراك'},{text:'🚪 خروج الكاشير'}]],resize_keyboard:true,is_persistent:true}; }
+function cashierKeyboard(){ return {keyboard:[[{text:'🧾 بيع'},{text:'🛒 مشتريات'}],[{text:'📦 الأصناف'},{text:'📚 المخزون'}],[{text:'👥 العملاء'},{text:'🚚 الموردون'}],[{text:'💼 الحسابات'},{text:'🧾 سند قبض'}],[{text:'💸 سند صرف'},{text:'💸 المصروفات'}],[{text:'📊 التقارير'},{text:'💎 الاشتراك'}],[{text:'🚪 خروج الكاشير'}]],resize_keyboard:true,is_persistent:true}; }
 function addHoursIso(hours){ const d=new Date(Date.now()+Number(hours||0)*3600000); return d.toISOString(); }
 function addDaysFrom(base,days){ const d=new Date(base||Date.now()); d.setUTCDate(d.getUTCDate()+Number(days||0)); return d.toISOString(); }
 function b64u(bytes){ let s=''; for(const b of bytes)s+=String.fromCharCode(b); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
@@ -703,7 +735,7 @@ async function requireSaas(env,chatId){ const a=await currentSaasAccount(env,cha
 async function openCashierAccount(env,chatId,from){ const a=await currentSaasAccount(env,chatId); if(a) return showCashierDashboard(env,chatId); return cashierProductLanding(env,chatId); }
 async function cashierProductLanding(env,chatId){
   const a=await currentSaasAccount(env,chatId); if(a) return showCashierDashboard(env,chatId);
-  return sendMessage(env,chatId,'💼 <b>أوسكار كاشير بوت</b>\n\nنظام كاشير كامل داخل تيليجرام: أصناف ومخزون، مبيعات، عملاء، موردون، مشتريات، مصروفات، صندوق وتقارير.\n\n🎁 <b>تجربة مجانية 24 ساعة</b> لمرة واحدة، وبعدها اختر المدة والسعر من الخطط التي يحددها الأدمن.\n\nتسجيل الدخول يكون باسم المستخدم وكلمة المرور فقط.',{inline_keyboard:[[{text:'بدء تجربة 24 ساعة',callback_data:'saas:trial'}],[{text:'تسجيل الدخول',callback_data:'saas:login'}],[{text:'خطط الاشتراك',callback_data:'saas:plans'}],[{text:'رجوع للمتجر',callback_data:'home'}]]});
+  return sendMessage(env,chatId,'🧮 <b>أوسكار المحاسبي</b>\n\nبرنامج محاسبة وتشغيل كامل داخل تيليجرام: كاشير ومبيعات ومشتريات وأصناف ومخزون وعملاء وموردون وحسابات وصندوق وسندات قبض وصرف ومصروفات وتقارير.\n\n🎁 <b>تجربة مجانية 24 ساعة</b> لمرة واحدة، وبعدها اختر المدة والسعر من الخطط التي يحددها الأدمن.\n\nتسجيل الدخول يكون باسم المستخدم وكلمة المرور فقط.',{inline_keyboard:[[{text:'بدء تجربة 24 ساعة',callback_data:'saas:trial'}],[{text:'تسجيل الدخول',callback_data:'saas:login'}],[{text:'خطط الاشتراك',callback_data:'saas:plans'}],[{text:'رجوع للمتجر',callback_data:'home'}]]});
 }
 async function beginTrialRegistration(env,chatId){ const exists=await env.DB.prepare('SELECT id FROM saas_accounts WHERE owner_chat_id=?').bind(String(chatId)).first(); if(exists) return showCashierDashboard(env,chatId); await setState(env,chatId,'SAAS_REG_USERNAME',{}); return sendMessage(env,chatId,'👤 <b>إنشاء حساب تجريبي</b>\n\nاكتب اسم مستخدم للحساب. استخدم حروفاً إنجليزية أو أرقاماً و _ فقط.',cancelKeyboard(false)); }
 async function beginCashierLogin(env,chatId){ await setState(env,chatId,'SAAS_LOGIN_USERNAME',{}); return sendMessage(env,chatId,'🔐 أرسل اسم المستخدم:',cancelKeyboard(false)); }
@@ -712,13 +744,13 @@ async function showCashierDashboard(env,chatId){
   const a=await currentSaasAccount(env,chatId); if(!a) return cashierProductLanding(env,chatId); const st=saasAccess(a);
   const counts=await Promise.all([env.DB.prepare('SELECT COUNT(*) c FROM pos_products WHERE account_id=? AND active=1').bind(a.id).first(),env.DB.prepare('SELECT COUNT(*) c FROM pos_customers WHERE account_id=?').bind(a.id).first(),env.DB.prepare('SELECT COUNT(*) c FROM pos_suppliers WHERE account_id=?').bind(a.id).first()]);
   const until=st.until?String(st.until).replace('T',' ').slice(0,16):'—';
-  return sendMessage(env,chatId,`💼 <b>${e(a.company_name)}</b>\n\n👤 ${e(a.username)}\n📌 الحالة: <b>${e(st.label)}</b>\n⏳ حتى: <code>${e(until)}</code>\n\n📦 الأصناف: <b>${Number(counts[0]?.c||0)}</b>\n👥 العملاء: <b>${Number(counts[1]?.c||0)}</b>\n🚚 الموردون: <b>${Number(counts[2]?.c||0)}</b>\n\nاختر من لوحة الكاشير أسفل الشاشة.`,st.active?cashierKeyboard():userKeyboard());
+  return sendMessage(env,chatId,`💼 <b>${e(a.company_name)}</b>\n\n👤 ${e(a.username)}\n📌 الحالة: <b>${e(st.label)}</b>\n⏳ حتى: <code>${e(until)}</code>\n\n📦 الأصناف: <b>${Number(counts[0]?.c||0)}</b>\n👥 العملاء: <b>${Number(counts[1]?.c||0)}</b>\n🚚 الموردون: <b>${Number(counts[2]?.c||0)}</b>\n\nاختر من لوحة أوسكار المحاسبي أسفل الشاشة.`,st.active?cashierKeyboard():userKeyboard());
 }
 async function showSubscriptionPlans(env,chatId){
   const a=await currentSaasAccount(env,chatId); const rows=await env.DB.prepare('SELECT * FROM saas_plans WHERE active=1 ORDER BY sort_order,days').all(); const plans=rows.results||[];
   if(!plans.length) return sendMessage(env,chatId,'💎 لا توجد خطط اشتراك مفعلة حالياً. تواصل مع الدعم.',a?cashierKeyboard():userKeyboard());
   const buttons=plans.map(p=>[{text:`${p.name} • ${p.days} يوم • ${money(p.price)} ${p.currency}`,callback_data:`saas:plan:${p.id}`}]); buttons.push([{text:'رجوع',callback_data:a?'saas:dashboard':'saas:landing'}]);
-  return sendMessage(env,chatId,'💎 <b>خطط أوسكار كاشير</b>\n\nاختر المدة المناسبة. يمكنك الشراء أثناء الفترة التجريبية، وعند اعتماد الدفع يتفعّل الاشتراك مباشرة.',ik(buttons));
+  return sendMessage(env,chatId,'💎 <b>خطط أوسكار المحاسبي</b>\n\nاختر المدة المناسبة. يمكنك الشراء أثناء الفترة التجريبية، وعند اعتماد الدفع يتفعّل الاشتراك مباشرة.',ik(buttons));
 }
 async function beginSaasPlanPurchase(env,chatId,planId){
   const a=await currentSaasAccount(env,chatId); if(!a) return sendMessage(env,chatId,'🔐 أنشئ حساباً تجريبياً أو سجل الدخول أولاً.',ik([[{text:'إنشاء حساب',callback_data:'saas:trial'}],[{text:'تسجيل الدخول',callback_data:'saas:login'}]]));
@@ -738,10 +770,10 @@ async function handleSaasProof(env,chatId,msg,state){
   const oid=id('sub'),code=`SUB-${String(Date.now()).slice(-7)}`; await env.DB.prepare(`INSERT INTO saas_subscription_orders(id,order_code,account_id,user_chat_id,username,customer_name,plan_id,plan_name,plan_days,price,currency,payment_method_id,payment_method_name,proof_type,proof_file_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`).bind(oid,code,a.id,String(chatId),cleanUsername(msg.from?.username),[msg.from?.first_name,msg.from?.last_name].filter(Boolean).join(' '),p.id,p.name,p.days,p.price,p.currency,m.id,m.name,proof_type,proof_file_id,now(),now()).run(); await clearState(env,chatId);
   await sendMessage(env,chatId,`⏳ <b>تم استلام طلب الاشتراك</b>\n\nرقم الطلب: <code>${code}</code>\nالخطة: ${e(p.name)}\nالمبلغ: <b>${money(p.price)} ${e(p.currency)}</b>\n\nسيتم تفعيل الحساب تلقائياً فور موافقة الإدارة.`,cashierKeyboard()); await notifyAdminSaasOrder(env,{id:oid,order_code:code,account:a,plan:p,method:m,proof_type,proof_file_id,msg});
 }
-async function notifyAdminSaasOrder(env,o){ const cfg=await getConfig(env); if(!cfg.owner_chat_id)return; const cap=`💵 <b>طلب اشتراك كاشير جديد</b>\n\n🧾 ${e(o.order_code)}\n🏢 ${e(o.account.company_name)}\n👤 ${e(o.account.username)}\n💎 ${e(o.plan.name)} — ${o.plan.days} يوم\n💰 <b>${money(o.plan.price)} ${e(o.plan.currency)}</b>\n💳 ${e(o.method.name)}\n\nراجع الإثبات:`; const kb=ik([[{text:'تأكيد وتفعيل',callback_data:`saasorder:approve:${o.id}`}],[{text:'رفض',callback_data:`saasorder:reject:${o.id}`}]]); if(o.proof_type==='photo')return sendPhoto(env,cfg.owner_chat_id,o.proof_file_id,cap,kb); return telegram(env,'sendDocument',{chat_id:String(cfg.owner_chat_id),document:o.proof_file_id,caption:cap,parse_mode:'HTML',reply_markup:kb}); }
+async function notifyAdminSaasOrder(env,o){ const cfg=await getConfig(env); if(!cfg.owner_chat_id)return; const cap=`💵 <b>طلب اشتراك أوسكار المحاسبي جديد</b>\n\n🧾 ${e(o.order_code)}\n🏢 ${e(o.account.company_name)}\n👤 ${e(o.account.username)}\n💎 ${e(o.plan.name)} — ${o.plan.days} يوم\n💰 <b>${money(o.plan.price)} ${e(o.plan.currency)}</b>\n💳 ${e(o.method.name)}\n\nراجع الإثبات:`; const kb=ik([[{text:'تأكيد وتفعيل',callback_data:`saasorder:approve:${o.id}`}],[{text:'رفض',callback_data:`saasorder:reject:${o.id}`}]]); if(o.proof_type==='photo')return sendPhoto(env,cfg.owner_chat_id,o.proof_file_id,cap,kb); return telegram(env,'sendDocument',{chat_id:String(cfg.owner_chat_id),document:o.proof_file_id,caption:cap,parse_mode:'HTML',reply_markup:kb}); }
 async function approveSaasOrder(env,chatId,oid){
   const o=await env.DB.prepare('SELECT * FROM saas_subscription_orders WHERE id=?').bind(oid).first(); if(!o)return adminSubscriptionOrders(env,chatId); if(o.status!=='pending')return adminSaasOrderView(env,chatId,oid); const a=await env.DB.prepare('SELECT * FROM saas_accounts WHERE id=?').bind(o.account_id).first(); if(!a)return;
-  const cur=a.subscription_ends_at&&Date.parse(a.subscription_ends_at)>Date.now()?a.subscription_ends_at:new Date().toISOString(); const end=addDaysFrom(cur,o.plan_days); await env.DB.batch([env.DB.prepare("UPDATE saas_subscription_orders SET status='approved',updated_at=? WHERE id=?").bind(now(),oid),env.DB.prepare("UPDATE saas_accounts SET status='active',subscription_ends_at=?,current_plan_name=?,updated_at=? WHERE id=?").bind(end,o.plan_name,now(),a.id)]); const updated={...a,status:'active',subscription_ends_at:end,current_plan_name:o.plan_name}; await syncSaasCompanyToMaster(env,updated).catch(()=>{}); await sendMessage(env,o.user_chat_id,`✅ <b>تم تأكيد الدفع وتفعيل حسابك</b>\n\n🏢 ${e(a.company_name)}\n💎 ${e(o.plan_name)}\n📅 صالح حتى: <code>${e(end.replace('T',' ').slice(0,16))}</code>\n\nيمكنك استخدام الكاشير الآن.`,cashierKeyboard()); return sendMessage(env,chatId,`✅ تم تفعيل ${e(a.company_name)} حتى ${e(end.slice(0,10))}.`,adminKeyboard());
+  const cur=a.subscription_ends_at&&Date.parse(a.subscription_ends_at)>Date.now()?a.subscription_ends_at:new Date().toISOString(); const end=addDaysFrom(cur,o.plan_days); await env.DB.batch([env.DB.prepare("UPDATE saas_subscription_orders SET status='approved',updated_at=? WHERE id=?").bind(now(),oid),env.DB.prepare("UPDATE saas_accounts SET status='active',subscription_ends_at=?,current_plan_name=?,updated_at=? WHERE id=?").bind(end,o.plan_name,now(),a.id)]); const updated={...a,status:'active',subscription_ends_at:end,current_plan_name:o.plan_name}; await syncSaasCompanyToMaster(env,updated).catch(()=>{}); await sendMessage(env,o.user_chat_id,`✅ <b>تم تأكيد الدفع وتفعيل حسابك</b>\n\n🏢 ${e(a.company_name)}\n💎 ${e(o.plan_name)}\n📅 صالح حتى: <code>${e(end.replace('T',' ').slice(0,16))}</code>\n\nيمكنك استخدام أوسكار المحاسبي الآن.`,cashierKeyboard()); return sendMessage(env,chatId,`✅ تم تفعيل ${e(a.company_name)} حتى ${e(end.slice(0,10))}.`,adminKeyboard());
 }
 async function rejectSaasOrder(env,chatId,oid,reason){ const o=await env.DB.prepare('SELECT * FROM saas_subscription_orders WHERE id=?').bind(oid).first(); if(!o)return; await env.DB.prepare("UPDATE saas_subscription_orders SET status='rejected',admin_note=?,updated_at=? WHERE id=?").bind(reason==='-'?'':reason,now(),oid).run(); await sendMessage(env,o.user_chat_id,`❌ <b>لم يتم اعتماد دفع الاشتراك</b>\n\nالطلب: <code>${e(o.order_code)}</code>${reason&&reason!=='-'?`\nالسبب: ${e(reason)}`:''}`,cashierKeyboard()); return sendMessage(env,chatId,'تم رفض الطلب وإشعار المستخدم.',adminKeyboard()); }
 
@@ -768,7 +800,9 @@ async function handleSaasState(env,chatId,msg,state,admin){
   if(state.mode==='POS_PUR_PAID'){ const v=Number(text.replace(',','.')); if(!Number.isFinite(v)||v<0)return sendMessage(env,chatId,'أرسل مبلغاً صحيحاً.',cancelKeyboard(false)); return posFinalizePurchase(env,chatId,{...state.data,paid:v}); }
   if(state.mode==='POS_EXP_CATEGORY'){ if(!text)return; await setState(env,chatId,'POS_EXP_NOTE',{category:text}); return sendMessage(env,chatId,'📝 أرسل البيان/الملاحظة:',cancelKeyboard(false)); }
   if(state.mode==='POS_EXP_NOTE'){ await setState(env,chatId,'POS_EXP_AMOUNT',{...state.data,note:text}); return sendMessage(env,chatId,'💰 أرسل مبلغ المصروف:',cancelKeyboard(false)); }
-  if(state.mode==='POS_EXP_AMOUNT'){ const v=Number(text.replace(',','.')); if(!Number.isFinite(v)||v<=0)return sendMessage(env,chatId,'أرسل مبلغاً صحيحاً.',cancelKeyboard(false)); const a=await requireSaas(env,chatId); if(!a)return; const eid=id('exp'); await env.DB.batch([env.DB.prepare('INSERT INTO pos_expenses(id,account_id,category,note,amount,created_at) VALUES(?,?,?,?,?,?)').bind(eid,a.id,state.data.category,state.data.note,v,now()),env.DB.prepare("INSERT INTO pos_cash_moves(id,account_id,kind,amount,ref_id,note,created_at) VALUES(?,?,'expense',?,?,?,?)").bind(id('cash'),a.id,-v,eid,state.data.note,now())]); await clearState(env,chatId); return sendMessage(env,chatId,'✅ تم تسجيل المصروف.',cashierKeyboard()); }
+  if(state.mode==='POS_EXP_AMOUNT'){ const v=Number(text.replace(',','.')); if(!Number.isFinite(v)||v<=0)return sendMessage(env,chatId,'أرسل مبلغاً صحيحاً.',cancelKeyboard(false)); const a=await requireSaas(env,chatId); if(!a)return; const eid=id('exp'); await env.DB.batch([env.DB.prepare('INSERT INTO pos_expenses(id,account_id,category,note,amount,created_at) VALUES(?,?,?,?,?,?)').bind(eid,a.id,state.data.category,state.data.note,v,now()),env.DB.prepare("INSERT INTO pos_cash_moves(id,account_id,kind,amount,ref_id,note,created_at) VALUES(?,?,'expense',?,?,?,?)").bind(id('cash'),a.id,-v,eid,state.data.note,now())]); await clearState(env,chatId); return sendMessage(env,chatId,'✅ تم تسجيل المصروف.',cashierKeyboard()); }  if(state.mode==='POS_VOUCHER_AMOUNT'){ const v=Number(text.replace(',','.')); if(!Number.isFinite(v)||v<=0)return sendMessage(env,chatId,'أرسل مبلغاً صحيحاً.',cancelKeyboard(false)); await setState(env,chatId,'POS_VOUCHER_PARTY',{...state.data,amount:v}); return sendMessage(env,chatId,'👤 أرسل اسم العميل / المورد / الجهة:',cancelKeyboard(false)); }
+  if(state.mode==='POS_VOUCHER_PARTY'){ if(!text)return sendMessage(env,chatId,'أرسل اسم الجهة.',cancelKeyboard(false)); await setState(env,chatId,'POS_VOUCHER_NOTE',{...state.data,party_name:text}); return sendMessage(env,chatId,'📝 أرسل البيان أو الملاحظة، أو - للتخطي:',cancelKeyboard(false)); }
+  if(state.mode==='POS_VOUCHER_NOTE'){ const a=await requireSaas(env,chatId); if(!a)return; const type=state.data.voucher_type==='payment'?'payment':'receipt'; const vid=id('vou'),no=`${type==='receipt'?'R':'P'}-${String(Date.now()).slice(-7)}`,amount=Number(state.data.amount); const signed=type==='receipt'?amount:-amount; await env.DB.batch([env.DB.prepare('INSERT INTO pos_vouchers(id,account_id,voucher_no,voucher_type,party_name,amount,note,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(vid,a.id,no,type,state.data.party_name,amount,text==='-'?'':text,now()),env.DB.prepare('INSERT INTO pos_cash_moves(id,account_id,kind,amount,ref_id,note,created_at) VALUES(?,?,?,?,?,?,?)').bind(id('cash'),a.id,type,signed,vid,`${type==='receipt'?'قبض من':'صرف إلى'} ${state.data.party_name}`,now())]); await clearState(env,chatId); return sendMessage(env,chatId,`✅ <b>تم حفظ ${type==='receipt'?'سند القبض':'سند الصرف'}</b>\n\n🔢 ${e(no)}\n👤 ${e(state.data.party_name)}\n💰 ${money(amount)}`,cashierKeyboard()); }
 }
 
 async function posProducts(env,chatId){ const a=await requireSaas(env,chatId); if(!a)return; const rows=await env.DB.prepare('SELECT * FROM pos_products WHERE account_id=? AND active=1 ORDER BY name LIMIT 50').bind(a.id).all(); const list=(rows.results||[]).map((p,i)=>`${i+1}. <b>${e(p.name)}</b> — ${money(p.sale_price)}\n   مخزون: ${Number(p.stock)} ${e(p.unit)} • تكلفة: ${money(p.avg_cost)}`).join('\n\n'); return sendMessage(env,chatId,`📦 <b>الأصناف</b>\n\n${list||'لا توجد أصناف بعد.'}`,ik([[{text:'إضافة صنف',callback_data:'pos:product:add'}],[{text:'لوحة الكاشير',callback_data:'saas:dashboard'}]])); }
@@ -792,12 +826,44 @@ async function posStartExpense(env,chatId){ if(!(await requireSaas(env,chatId)))
 async function posCash(env,chatId){ const a=await requireSaas(env,chatId); if(!a)return; const r=await env.DB.prepare('SELECT COALESCE(SUM(amount),0) balance,COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) ins,COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) outs FROM pos_cash_moves WHERE account_id=?').bind(a.id).first(); return sendMessage(env,chatId,`💰 <b>الصندوق</b>\n\n⬆️ الداخل: ${money(r?.ins)}\n⬇️ الخارج: ${money(r?.outs)}\n💵 الرصيد: <b>${money(r?.balance)}</b>`,cashierKeyboard()); }
 async function posDailyReport(env,chatId){ const a=await requireSaas(env,chatId); if(!a)return; const start=new Date(); start.setHours(0,0,0,0); const iso=start.toISOString(); const [s,p,x,l]=await Promise.all([env.DB.prepare('SELECT COALESCE(SUM(total),0) total,COALESCE(SUM(paid),0) paid,COUNT(*) c FROM pos_sales WHERE account_id=? AND created_at>=?').bind(a.id,iso).first(),env.DB.prepare('SELECT COALESCE(SUM(total),0) total,COUNT(*) c FROM pos_purchases WHERE account_id=? AND created_at>=?').bind(a.id,iso).first(),env.DB.prepare('SELECT COALESCE(SUM(amount),0) total,COUNT(*) c FROM pos_expenses WHERE account_id=? AND created_at>=?').bind(a.id,iso).first(),env.DB.prepare('SELECT COUNT(*) c FROM pos_products WHERE account_id=? AND stock<=reorder_level').bind(a.id).first()]); return sendMessage(env,chatId,`📊 <b>تقرير اليوم</b>\n\n🧾 المبيعات: ${money(s?.total)} (${Number(s?.c||0)} فاتورة)\n💵 المحصل: ${money(s?.paid)}\n🛒 المشتريات: ${money(p?.total)} (${Number(p?.c||0)})\n💸 المصروفات: ${money(x?.total)} (${Number(x?.c||0)})\n⚠️ أصناف منخفضة: ${Number(l?.c||0)}`,cashierKeyboard()); }
 
+
+async function posInventorySummary(env,chatId){
+  const a=await requireSaas(env,chatId); if(!a)return;
+  const r=await env.DB.prepare('SELECT COUNT(*) c,COALESCE(SUM(stock),0) qty,COALESCE(SUM(stock*avg_cost),0) cost_value,COALESCE(SUM(stock*sale_price),0) sale_value,COALESCE(SUM(CASE WHEN stock<=reorder_level THEN 1 ELSE 0 END),0) low FROM pos_products WHERE account_id=? AND active=1').bind(a.id).first();
+  return sendMessage(env,chatId,`📚 <b>ملخص المخزون</b>\n\n📦 عدد الأصناف: <b>${Number(r?.c||0)}</b>\n🔢 إجمالي الكميات: <b>${Number(r?.qty||0)}</b>\n💵 قيمة المخزون بالتكلفة: <b>${money(r?.cost_value)}</b>\n💰 قيمة المخزون بسعر البيع: <b>${money(r?.sale_value)}</b>\n⚠️ منخفض المخزون: <b>${Number(r?.low||0)}</b>`,cashierKeyboard());
+}
+async function posAccounts(env,chatId){
+  const a=await requireSaas(env,chatId); if(!a)return;
+  const [cash,cu,su,rec,pay]=await Promise.all([
+    env.DB.prepare('SELECT COALESCE(SUM(amount),0) v FROM pos_cash_moves WHERE account_id=?').bind(a.id).first(),
+    env.DB.prepare('SELECT COALESCE(SUM(balance),0) v FROM pos_customers WHERE account_id=?').bind(a.id).first(),
+    env.DB.prepare('SELECT COALESCE(SUM(balance),0) v FROM pos_suppliers WHERE account_id=?').bind(a.id).first(),
+    env.DB.prepare("SELECT COALESCE(SUM(amount),0) v FROM pos_vouchers WHERE account_id=? AND voucher_type='receipt'").bind(a.id).first(),
+    env.DB.prepare("SELECT COALESCE(SUM(amount),0) v FROM pos_vouchers WHERE account_id=? AND voucher_type='payment'").bind(a.id).first()
+  ]);
+  return sendMessage(env,chatId,`💼 <b>الحسابات</b>\n\n💰 رصيد الصندوق: <b>${money(cash?.v)}</b>\n👥 أرصدة العملاء: <b>${money(cu?.v)}</b>\n🚚 أرصدة الموردين: <b>${money(su?.v)}</b>\n🧾 إجمالي سندات القبض: ${money(rec?.v)}\n💸 إجمالي سندات الصرف: ${money(pay?.v)}`,cashierKeyboard());
+}
+async function posStartVoucher(env,chatId,type){
+  if(!(await requireSaas(env,chatId)))return;
+  const label=type==='receipt'?'سند قبض':'سند صرف';
+  await setState(env,chatId,'POS_VOUCHER_AMOUNT',{voucher_type:type});
+  return sendMessage(env,chatId,`${type==='receipt'?'🧾':'💸'} <b>${label}</b>\n\nأرسل المبلغ:`,cancelKeyboard(false));
+}
+async function posReportsMenu(env,chatId){
+  const a=await requireSaas(env,chatId); if(!a)return;
+  const buttons=ik([[{text:'تقرير اليوم',callback_data:'pos:report:today'}],[{text:'آخر فواتير البيع',callback_data:'pos:report:sales'}],[{text:'آخر المشتريات',callback_data:'pos:report:purchases'}],[{text:'أرصدة العملاء والموردين',callback_data:'pos:report:balances'}],[{text:'لوحة المحاسبة',callback_data:'saas:dashboard'}]]);
+  return sendMessage(env,chatId,'📊 <b>التقارير</b>\n\nاختر التقرير المطلوب:',buttons);
+}
+async function posRecentSales(env,chatId){ const a=await requireSaas(env,chatId); if(!a)return; const rows=await env.DB.prepare('SELECT * FROM pos_sales WHERE account_id=? ORDER BY created_at DESC LIMIT 15').bind(a.id).all(); const list=(rows.results||[]).map(x=>`🧾 <b>${e(x.invoice_no)}</b> • ${e(x.customer_name)}\n💰 ${money(x.total)} • مدفوع ${money(x.paid)} • متبقي ${money(x.remaining)}`).join('\n\n'); return sendMessage(env,chatId,`📋 <b>آخر فواتير البيع</b>\n\n${list||'لا توجد فواتير.'}`,cashierKeyboard()); }
+async function posRecentPurchases(env,chatId){ const a=await requireSaas(env,chatId); if(!a)return; const rows=await env.DB.prepare('SELECT * FROM pos_purchases WHERE account_id=? ORDER BY created_at DESC LIMIT 15').bind(a.id).all(); const list=(rows.results||[]).map(x=>`🛒 <b>${e(x.purchase_no)}</b> • ${e(x.supplier_name)}\n💰 ${money(x.total)} • مدفوع ${money(x.paid)} • متبقي ${money(x.remaining)}`).join('\n\n'); return sendMessage(env,chatId,`📋 <b>آخر المشتريات</b>\n\n${list||'لا توجد مشتريات.'}`,cashierKeyboard()); }
+async function posBalances(env,chatId){ const a=await requireSaas(env,chatId); if(!a)return; const [cs,ss]=await Promise.all([env.DB.prepare('SELECT name,balance FROM pos_customers WHERE account_id=? AND balance<>0 ORDER BY ABS(balance) DESC LIMIT 20').bind(a.id).all(),env.DB.prepare('SELECT name,balance FROM pos_suppliers WHERE account_id=? AND balance<>0 ORDER BY ABS(balance) DESC LIMIT 20').bind(a.id).all()]); const cl=(cs.results||[]).map(x=>`• ${e(x.name)}: <b>${money(x.balance)}</b>`).join('\n')||'لا توجد أرصدة'; const sl=(ss.results||[]).map(x=>`• ${e(x.name)}: <b>${money(x.balance)}</b>`).join('\n')||'لا توجد أرصدة'; return sendMessage(env,chatId,`👥 <b>أرصدة العملاء</b>\n${cl}\n\n🚚 <b>أرصدة الموردين</b>\n${sl}`,cashierKeyboard()); }
+
 async function adminPlans(env,chatId){ const rows=await env.DB.prepare('SELECT * FROM saas_plans ORDER BY sort_order,days').all(); const bs=[[{text:'إضافة خطة',callback_data:'admin:plan:add'}]]; for(const p of rows.results||[])bs.push([{text:`${p.active?'🟢':'⚪'} ${p.name} • ${p.days} يوم • ${money(p.price)} ${p.currency}`,callback_data:`admin:plan:toggle:${p.id}`}],[{text:`حذف ${p.name}`,callback_data:`admin:plan:delete:${p.id}`}]); bs.push([{text:'لوحة الإدارة',callback_data:'home'}]); return sendMessage(env,chatId,'💎 <b>خطط الاشتراك</b>\n\nالضغط على الخطة يفعّل/يوقف ظهورها.',ik(bs)); }
 async function adminPlanToggle(env,chatId,pid){ await env.DB.prepare('UPDATE saas_plans SET active=CASE active WHEN 1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?').bind(now(),pid).run(); return adminPlans(env,chatId); }
 async function adminPlanDelete(env,chatId,pid){ if(['plan_month','plan_year'].includes(pid)){await env.DB.prepare('UPDATE saas_plans SET active=0,updated_at=? WHERE id=?').bind(now(),pid).run();}else await env.DB.prepare('DELETE FROM saas_plans WHERE id=?').bind(pid).run(); return adminPlans(env,chatId); }
-async function adminSaasAccounts(env,chatId,companiesLabel=false){ const rows=await env.DB.prepare('SELECT * FROM saas_accounts ORDER BY created_at DESC LIMIT 50').all(); const bs=[[{text:'إنشاء شركة يدوياً',callback_data:'admin:saas_add'}]]; for(const a of rows.results||[]){const st=saasAccess(a);bs.push([{text:`${st.active?'🟢':'🔴'} ${a.company_name} • ${a.username}`,callback_data:`admin:saas:view:${a.id}`}]);} bs.push([{text:'لوحة الإدارة',callback_data:'home'}]); return sendMessage(env,chatId,`🏢 <b>${companiesLabel?'الشركات المسجلة':'حسابات أوسكار كاشير'}</b>\n\nإجمالي: ${Number((rows.results||[]).length)}`,ik(bs)); }
+async function adminSaasAccounts(env,chatId,companiesLabel=false){ const rows=await env.DB.prepare('SELECT * FROM saas_accounts ORDER BY created_at DESC LIMIT 50').all(); const bs=[[{text:'إنشاء شركة يدوياً',callback_data:'admin:saas_add'}]]; for(const a of rows.results||[]){const st=saasAccess(a);bs.push([{text:`${st.active?'🟢':'🔴'} ${a.company_name} • ${a.username}`,callback_data:`admin:saas:view:${a.id}`}]);} bs.push([{text:'لوحة الإدارة',callback_data:'home'}]); return sendMessage(env,chatId,`🏢 <b>${companiesLabel?'الشركات المسجلة':'حسابات أوسكار المحاسبي'}</b>\n\nإجمالي: ${Number((rows.results||[]).length)}`,ik(bs)); }
 async function adminSaasAccountView(env,chatId,aid){ const a=await env.DB.prepare('SELECT * FROM saas_accounts WHERE id=?').bind(aid).first(); if(!a)return adminSaasAccounts(env,chatId); const st=saasAccess(a); const until=st.until?st.until.replace('T',' ').slice(0,16):'—'; return sendMessage(env,chatId,`🏢 <b>${e(a.company_name)}</b>\n👤 ${e(a.username)}\n📌 ${e(st.label)}\n⏳ حتى: ${e(until)}\n💎 ${e(a.current_plan_name||'بدون خطة مدفوعة')}\n🆔 <code>${e(a.id)}</code>`,ik([[{text:'إضافة أيام',callback_data:`admin:saas:adddays:${a.id}`}],[{text:'رجوع',callback_data:'admin:saas_accounts'}]])); }
-async function adminSubscriptionOrders(env,chatId){ const rows=await env.DB.prepare('SELECT * FROM saas_subscription_orders ORDER BY created_at DESC LIMIT 50').all(); const bs=(rows.results||[]).map(o=>[{text:`${statusEmoji(o.status)} ${o.order_code} • ${o.plan_name}`,callback_data:`saasorder:view:${o.id}`}]); bs.unshift([{text:'الحسابات',callback_data:'admin:saas_accounts'}]); bs.push([{text:'لوحة الإدارة',callback_data:'home'}]); return sendMessage(env,chatId,`💵 <b>طلبات اشتراك الكاشير</b>\n\n${(rows.results||[]).length?'اختر طلباً لعرضه.':'لا توجد طلبات.'}`,ik(bs)); }
+async function adminSubscriptionOrders(env,chatId){ const rows=await env.DB.prepare('SELECT * FROM saas_subscription_orders ORDER BY created_at DESC LIMIT 50').all(); const bs=(rows.results||[]).map(o=>[{text:`${statusEmoji(o.status)} ${o.order_code} • ${o.plan_name}`,callback_data:`saasorder:view:${o.id}`}]); bs.unshift([{text:'الحسابات',callback_data:'admin:saas_accounts'}]); bs.push([{text:'لوحة الإدارة',callback_data:'home'}]); return sendMessage(env,chatId,`💵 <b>طلبات اشتراك أوسكار المحاسبي</b>\n\n${(rows.results||[]).length?'اختر طلباً لعرضه.':'لا توجد طلبات.'}`,ik(bs)); }
 async function adminSaasOrderView(env,chatId,oid){ const o=await env.DB.prepare('SELECT * FROM saas_subscription_orders WHERE id=?').bind(oid).first(); if(!o)return adminSubscriptionOrders(env,chatId); const a=await env.DB.prepare('SELECT * FROM saas_accounts WHERE id=?').bind(o.account_id).first(); const bs=[]; if(o.status==='pending')bs.push([{text:'تأكيد وتفعيل',callback_data:`saasorder:approve:${o.id}`}],[{text:'رفض',callback_data:`saasorder:reject:${o.id}`}]); bs.push([{text:'رجوع',callback_data:'admin:saas_orders'}]); const txt=`💵 <b>${e(o.order_code)}</b>\n🏢 ${e(a?.company_name||'-')}\n👤 ${e(a?.username||'-')}\n💎 ${e(o.plan_name)} • ${o.plan_days} يوم\n💰 ${money(o.price)} ${e(o.currency)}\n💳 ${e(o.payment_method_name)}\n📌 ${statusText(o.status)}`; if(o.proof_type==='photo'&&o.proof_file_id)return sendPhoto(env,chatId,o.proof_file_id,txt,ik(bs)); return sendMessage(env,chatId,txt,ik(bs)); }
 async function handleSaasAdminState(env,chatId,msg,state){ const text=String(msg.text||'').trim(); if(text==='❌ إلغاء'){await clearState(env,chatId);return showAdminHome(env,chatId);} if(state.mode==='ADMIN_PLAN_NAME'){if(!text)return;await setState(env,chatId,'ADMIN_PLAN_DAYS',{name:text});return sendMessage(env,chatId,'📅 أرسل عدد الأيام، مثال 30 أو 365:',cancelKeyboard(true));} if(state.mode==='ADMIN_PLAN_DAYS'){const d=parseInt(text,10);if(!Number.isFinite(d)||d<1||d>3650)return sendMessage(env,chatId,'عدد الأيام بين 1 و3650.',cancelKeyboard(true));await setState(env,chatId,'ADMIN_PLAN_PRICE',{...state.data,days:d});return sendMessage(env,chatId,'💰 أرسل السعر:',cancelKeyboard(true));} if(state.mode==='ADMIN_PLAN_PRICE'){const v=Number(text.replace(',','.'));if(!Number.isFinite(v)||v<0)return sendMessage(env,chatId,'سعر غير صحيح.',cancelKeyboard(true));await setState(env,chatId,'ADMIN_PLAN_CURRENCY',{...state.data,price:v});return sendMessage(env,chatId,'💱 أرسل العملة مثل ₪ أو EGP أو $:',cancelKeyboard(true));} if(state.mode==='ADMIN_PLAN_CURRENCY'){const d=state.data;await env.DB.prepare('INSERT INTO saas_plans(id,name,days,price,currency,active,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,1,0,?,?)').bind(id('plan'),d.name,d.days,d.price,text||'₪',now(),now()).run();await clearState(env,chatId);return adminPlans(env,chatId);} if(state.mode==='ADMIN_SAAS_ADD_DAYS'){const d=parseInt(text,10);if(!Number.isFinite(d)||d<1||d>3650)return sendMessage(env,chatId,'أرسل عدداً بين 1 و3650.',cancelKeyboard(true));const a=await env.DB.prepare('SELECT * FROM saas_accounts WHERE id=?').bind(state.data.account_id).first();if(!a)return;const base=a.subscription_ends_at&&Date.parse(a.subscription_ends_at)>Date.now()?a.subscription_ends_at:new Date().toISOString(),end=addDaysFrom(base,d);await env.DB.prepare("UPDATE saas_accounts SET status='active',subscription_ends_at=?,current_plan_name=?,updated_at=? WHERE id=?").bind(end,`إضافة يدوية ${d} يوم`,now(),a.id).run();await clearState(env,chatId);const u={...a,status:'active',subscription_ends_at:end,current_plan_name:`إضافة يدوية ${d} يوم`};await syncSaasCompanyToMaster(env,u).catch(()=>{});await sendMessage(env,a.owner_chat_id,`🎁 أضافت الإدارة ${d} يوم إلى حسابك.\nصالح حتى: ${e(end.slice(0,10))}`,cashierKeyboard());return adminSaasAccountView(env,chatId,a.id);} if(state.mode==='ADMIN_SAAS_REJECT'){const oid=state.data.order_id;await clearState(env,chatId);return rejectSaasOrder(env,chatId,oid,text||'-');} if(state.mode==='ADMIN_SAAS_COMPANY'){if(!text)return;await setState(env,chatId,'ADMIN_SAAS_USERNAME',{company_name:text});return sendMessage(env,chatId,'👤 أرسل اسم مستخدم للحساب:',cancelKeyboard(true));} if(state.mode==='ADMIN_SAAS_USERNAME'){if(!/^[A-Za-z0-9_]{4,30}$/.test(text))return sendMessage(env,chatId,'اسم مستخدم غير صالح.',cancelKeyboard(true));const ex=await env.DB.prepare('SELECT id FROM saas_accounts WHERE username=? COLLATE NOCASE').bind(text).first();if(ex)return sendMessage(env,chatId,'الاسم مستخدم.',cancelKeyboard(true));await setState(env,chatId,'ADMIN_SAAS_PASSWORD',{...state.data,username:text});return sendMessage(env,chatId,'🔑 أرسل كلمة المرور:',cancelKeyboard(true));} if(state.mode==='ADMIN_SAAS_PASSWORD'){if(text.length<6)return sendMessage(env,chatId,'6 أحرف على الأقل.',cancelKeyboard(true));try{if(msg.message_id)await telegram(env,'deleteMessage',{chat_id:String(chatId),message_id:msg.message_id});}catch{}const hp=await hashPassword(text);await setState(env,chatId,'ADMIN_SAAS_DAYS',{...state.data,password_salt:hp.salt,password_hash:hp.hash});return sendMessage(env,chatId,'📅 أرسل مدة التفعيل بالأيام، أو 0 لتجربة 24 ساعة:',cancelKeyboard(true));} if(state.mode==='ADMIN_SAAS_DAYS'){const d=parseInt(text,10);if(!Number.isFinite(d)||d<0||d>3650)return sendMessage(env,chatId,'أرسل 0 إلى 3650.',cancelKeyboard(true));const aid=id('acc'),start=now(),trial=addHoursIso(24),sub=d>0?addDaysFrom(start,d):null;await env.DB.prepare(`INSERT INTO saas_accounts(id,owner_chat_id,username,password_salt,password_hash,company_name,telegram_username,status,trial_started_at,trial_ends_at,subscription_ends_at,current_plan_name,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)`).bind(aid,`ADMIN-${aid}`,state.data.username,state.data.password_salt,state.data.password_hash,state.data.company_name,d>0?'active':'trial',start,trial,sub,d>0?`تفعيل يدوي ${d} يوم`:null,start,start).run();await clearState(env,chatId);const a=await env.DB.prepare('SELECT * FROM saas_accounts WHERE id=?').bind(aid).first();await syncSaasCompanyToMaster(env,a).catch(()=>{});await sendMessage(env,chatId,`✅ تم إنشاء الشركة.\n🏢 ${e(a.company_name)}\n👤 ${e(a.username)}\n${d>0?`📅 ${d} يوم`:'🎁 تجربة 24 ساعة'}`,adminKeyboard());return adminSaasAccountView(env,chatId,a.id);} }
 
