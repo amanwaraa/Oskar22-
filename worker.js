@@ -1,5 +1,5 @@
 const DEFAULT_BOT_TOKEN = "8743553964:AAFdDUy2isOSdgvc50ltCDrSVvlK9dOSu2U";
-const BOT_VERSION = '4.0.0-oscar-p2p-store';
+const BOT_VERSION = '4.1.0-oscar-p2p-store-payment-cards';
 const DEFAULT_ADMIN_USERNAME = 'PUPGG_PAY';
 
 export default {
@@ -240,9 +240,24 @@ async function showProducts(env,chatId,index=0,admin=false){
 
 async function showPaymentMethods(env,chatId,admin=false){
   const rows=await env.DB.prepare('SELECT * FROM store_payment_methods WHERE active=1 ORDER BY sort_order ASC, created_at ASC').all();
-  if(!(rows.results||[]).length) return sendMessage(env,chatId,'💳 لا توجد طرق دفع متاحة حالياً.',admin?adminKeyboard():userKeyboard());
-  const buttons=(rows.results||[]).map(m=>[{text:`💳 ${m.name}`,callback_data:`payview:${m.id}`}]); buttons.push([{text:'🏠 الرئيسية',callback_data:'home'}]);
-  return sendMessage(env,chatId,'💳 <b>طرق الدفع المتاحة</b>\n\nاختر طريقة لعرض بياناتها:',ik(buttons));
+  const methods=rows.results||[];
+  if(!methods.length) return sendMessage(env,chatId,'💳 لا توجد طرق دفع متاحة حالياً.',admin?adminKeyboard():userKeyboard());
+  await sendMessage(env,chatId,'💳 <b>طرق الدفع المتاحة</b>
+
+تم تحسين العرض بحيث تظهر صورة كل طريقة دفع داخل الرسالة نفسها، وتحتها أزرار شفافة أنيقة بدل الاكتفاء بملصق أو رمز صغير داخل الزر.',admin?adminKeyboard():userKeyboard());
+  for(let i=0;i<methods.length;i++){
+    const m=methods[i];
+    const txt=`💳 <b>${e(m.name)}</b>
+${m.details?`
+${e(m.details)}`:''}
+
+📍 الطريقة ${i+1} من ${methods.length}`;
+    const buttons=admin
+      ? ik([[{text:'عرض / تعديل',callback_data:`payment:view:${m.id}`}],[{text:'رجوع',callback_data:'home'}]])
+      : ik([[{text:'عرض البيانات',callback_data:`payview:${m.id}`}],[{text:'الرئيسية',callback_data:'home'}]]);
+    if(m.photo_file_id) await sendPhoto(env,chatId,m.photo_file_id,txt,buttons);
+    else await sendMessage(env,chatId,txt,buttons);
+  }
 }
 
 async function showSupport(env,chatId,admin=false){
@@ -256,8 +271,23 @@ async function beginBuy(env,chatId,productId){
   const rows=await env.DB.prepare('SELECT * FROM store_payment_methods WHERE active=1 ORDER BY sort_order ASC,created_at ASC').all();
   const methods=rows.results||[];
   if(!methods.length) return sendMessage(env,chatId,'⚠️ لا توجد طريقة دفع مفعلة حالياً. تواصل مع الدعم.',userKeyboard());
-  const buttons=methods.map(m=>[{text:`💳 ${m.name}`,callback_data:`choosepay:${productId}:${m.id}`}]); buttons.push([{text:'↩️ رجوع للبرامج',callback_data:'shop:0'}]);
-  return sendMessage(env,chatId,`🛒 <b>شراء ${e(p.name)}</b>\n💰 السعر: <b>${money(p.price)} ${e(p.currency)}</b>\n\nاختر طريقة الدفع:`,ik(buttons));
+  await sendMessage(env,chatId,`🛒 <b>شراء ${e(p.name)}</b>
+💰 السعر: <b>${money(p.price)} ${e(p.currency)}</b>
+
+اختر طريقة الدفع من البطاقات التالية. الآن ستظهر صورة كل طريقة دفع نفسها داخل الرسالة، وتحتها زر شفاف لاختيارها.`,userKeyboard());
+  for(let i=0;i<methods.length;i++){
+    const m=methods[i];
+    const txt=`💳 <b>${e(m.name)}</b>
+${m.details?`
+${e(m.details)}`:''}
+
+🛍 للبرنامج: <b>${e(p.name)}</b>
+💰 المطلوب: <b>${money(p.price)} ${e(p.currency)}</b>
+📍 الطريقة ${i+1} من ${methods.length}`;
+    const buttons=ik([[{text:'اختيار هذه الطريقة',callback_data:`choosepay:${productId}:${m.id}`}],[{text:'رجوع للبرامج',callback_data:'shop:0'}]]);
+    if(m.photo_file_id) await sendPhoto(env,chatId,m.photo_file_id,txt,buttons);
+    else await sendMessage(env,chatId,txt,buttons);
+  }
 }
 
 async function showCheckout(env,chatId,productId,methodId){
@@ -266,7 +296,7 @@ async function showCheckout(env,chatId,productId,methodId){
   if(!p||!m) return sendMessage(env,chatId,'⚠️ البرنامج أو طريقة الدفع غير متاحة الآن.',userKeyboard());
   await setState(env,chatId,'AWAIT_PROOF',{product_id:p.id,payment_method_id:m.id});
   const text=`💳 <b>${e(m.name)}</b>\n\n${e(m.details)}\n\n🛍 البرنامج: <b>${e(p.name)}</b>\n💰 المطلوب: <b>${money(p.price)} ${e(p.currency)}</b>\n\nبعد الدفع اضغط الزر ثم أرسل <b>صورة إثبات الدفع</b>.`;
-  const buttons=ik([[{text:'✅ دفعت — إرسال الإثبات',callback_data:`proof:${p.id}:${m.id}`}],[{text:'❌ إلغاء',callback_data:'home'}]]);
+  const buttons=ik([[{text:'إرسال إثبات الدفع',callback_data:`proof:${p.id}:${m.id}`}],[{text:'إلغاء',callback_data:'home'}]]);
   if(m.photo_file_id) return sendPhoto(env,chatId,m.photo_file_id,text,buttons);
   return sendMessage(env,chatId,text,buttons);
 }
@@ -337,7 +367,7 @@ async function handleCallback(env,chatId,data,q){
 
 async function paymentMethodView(env,chatId,id,admin=false){
   const m=await env.DB.prepare('SELECT * FROM store_payment_methods WHERE id=?').bind(id).first(); if(!m) return;
-  const txt=`💳 <b>${e(m.name)}</b>\n\n${e(m.details)}`; const buttons=admin?ik([[{text:'✏️ تعديل',callback_data:`payment:edit:${m.id}`}],[{text:'↩️ رجوع',callback_data:'admin:payments'}]]):ik([[{text:'🏠 الرئيسية',callback_data:'home'}]]);
+  const txt=`💳 <b>${e(m.name)}</b>\n\n${e(m.details)}`; const buttons=admin?ik([[{text:'تعديل',callback_data:`payment:edit:${m.id}`}],[{text:'رجوع',callback_data:'admin:payments'}]]):ik([[{text:'الرئيسية',callback_data:'home'}]]);
   if(m.photo_file_id) return sendPhoto(env,chatId,m.photo_file_id,txt,buttons); return sendMessage(env,chatId,txt,buttons);
 }
 
