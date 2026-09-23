@@ -4,7 +4,7 @@ const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BOT_VERSION = '3.0.0-oscar-full-link';
+const BOT_VERSION = '3.1.0-start-login-buttons';
 
 export default {
   async fetch(request, env, ctx) {
@@ -30,7 +30,7 @@ export default {
           { command:'start', description:'بدء البوت أو فتح الحساب' },
           { command:'menu', description:'القائمة الرئيسية' },
           { command:'check', description:'فحص ربط قاعدة أوسكار' },
-          { command:'login', description:'تسجيل الدخول بملف mzauth' },
+          { command:'login', description:'فتح شاشة تسجيل الدخول' },
           { command:'logout', description:'تسجيل الخروج' }
         ]});
         return json({ success: !!tg.ok, version: BOT_VERSION, webhook: webhookUrl, telegram: tg, commands });
@@ -162,15 +162,16 @@ async function processUpdate(update, env) {
 
   const text = String(msg.text || '').trim();
   if (text === '/logout' || text === '🚪 تسجيل خروج') return logout(chatId, env);
-  if (text === '/start') return start(chatId, env, msg);
-  if (text === '/login') return askForLoginFile(chatId);
+  if (text === '/start' || text === '🏠 البداية') return start(chatId, env, msg);
+  if (text === '/login' || text === '🔐 تسجيل الدخول') return askForLoginFile(chatId);
+  if (text === 'ℹ️ طريقة الدخول') return showLoginHelp(chatId);
 
   if (msg.document && /\.mzauth$/i.test(String(msg.document.file_name || ''))) {
     return loginFromTelegramDocument(chatId, msg.document, env);
   }
 
   const session = await getSession(chatId, env);
-  if (!session) return askForLoginFile(chatId);
+  if (!session) return start(chatId, env, msg);
 
   if (text === '/check') return showConnectionCheck(chatId, session);
   if (text === '/menu') return showMainMenu(chatId, session);
@@ -191,17 +192,58 @@ async function start(chatId, env, msg) {
   if (session) return showMainMenu(chatId, session);
   const name = e(msg?.from?.first_name || 'مستخدم');
   return sendMessage(chatId,
-    `👋 أهلاً ${name} في <b>أوسكار المحاسبي عبر تيليجرام</b>.\n\n` +
-    `لتسجيل الدخول بنفس حساب البرنامج، أرسل هنا <b>ملف الدخول .mzauth</b> الخاص بالمدير أو الموظف.\n\n` +
-    `بعد التحقق ستظهر لك الأقسام حسب صلاحيات نفس الحساب.`,
-    { inline_keyboard: [[{ text: '📎 أرسل ملف الدخول .mzauth', callback_data: 'login_help' }]] }
+    `👋 أهلاً ${name}
+
+` +
+    `<b>أوسكار المحاسبي عبر تيليجرام</b>
+` +
+    `ادخل بنفس حساب أوسكار، وبعدها تظهر لك الأقسام والعمليات حسب صلاحيات حسابك.
+
+` +
+    `اضغط <b>تسجيل الدخول</b> للبدء.`,
+    startLoginButtons()
   );
+}
+
+function startLoginButtons() {
+  return { inline_keyboard: [
+    [btn('🔐 تسجيل الدخول', 'login_start')],
+    [btn('ℹ️ طريقة الدخول', 'login_help')]
+  ] };
 }
 
 async function askForLoginFile(chatId) {
   return sendMessage(chatId,
-    '🔐 <b>يلزم تسجيل الدخول</b>\n\nأرسل ملف دخول أوسكار <code>.mzauth</code> هنا مباشرة.',
-    { inline_keyboard: [[{ text: 'ℹ️ طريقة الدخول', callback_data: 'login_help' }]] }
+    '🔐 <b>تسجيل الدخول إلى أوسكار</b>
+
+' +
+    '1️⃣ اضغط علامة المشبك 📎 بجانب مربع الكتابة.
+' +
+    '2️⃣ اختر <b>ملف</b>.
+' +
+    '3️⃣ أرسل نفس ملف <code>.mzauth</code> الذي تستخدمه للدخول إلى برنامج أوسكار.
+
+' +
+    'بمجرد إرسال الملف سأقرأه وأسجل الحساب تلقائياً.',
+    { inline_keyboard: [
+      [btn('📎 جاهز لإرسال ملف الدخول', 'login_waiting')],
+      [btn('🏠 رجوع للبداية', 'start_screen')]
+    ] }
+  );
+}
+
+async function showLoginHelp(chatId) {
+  return sendMessage(chatId,
+    'ℹ️ <b>طريقة تسجيل الدخول</b>
+
+' +
+    'افتح برنامج أوسكار ونزّل ملف دخول المدير أو الموظف بصيغة <code>.mzauth</code>.
+' +
+    'بعدها ارجع للبوت واضغط <b>تسجيل الدخول</b> ثم أرسل الملف كمستند، وليس صورة.
+
+' +
+    'كل حساب يدخل بنفس صلاحياته الموجودة في أوسكار.',
+    startLoginButtons()
   );
 }
 
@@ -257,16 +299,24 @@ async function loginFromTelegramDocument(chatId, doc, env) {
     return showMainMenu(chatId, { payload });
   } catch (error) {
     console.error('LOGIN_ERROR', error);
-    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\nأرسل نفس ملف <code>.mzauth</code> الذي تدخل به إلى البرنامج.`, {
-      inline_keyboard:[[btn('🔄 محاولة جديدة','login_help')]]
+    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>
+
+${e(String(error?.message || error))}
+
+اضغط تسجيل الدخول وحاول إرسال ملف <code>.mzauth</code> مرة أخرى.`, {
+      inline_keyboard:[
+        [btn('🔐 تسجيل الدخول','login_start')],
+        [btn('ℹ️ طريقة الدخول','login_help')]
+      ]
     });
+
   }
 }
 
 async function logout(chatId, env) {
   await env.DB.prepare('UPDATE telegram_sessions SET active=0,updated_at=? WHERE chat_id=?').bind(new Date().toISOString(), chatId).run();
   await setState(chatId, 'IDLE', {}, env);
-  return sendMessage(chatId, '🚪 تم تسجيل الخروج من حساب أوسكار.\n\nأرسل ملف <code>.mzauth</code> للدخول من جديد.');
+  return sendMessage(chatId, '🚪 تم تسجيل الخروج من حساب أوسكار.\n\nاضغط تسجيل الدخول للدخول بحساب آخر.', startLoginButtons());
 }
 
 function hasPerm(session, key) {
@@ -361,7 +411,9 @@ function permissionForCallback(data){
 }
 
 async function handleCallback(chatId, data, env) {
-  if (data === 'login_help') return askForLoginFile(chatId);
+  if (data === 'login_start' || data === 'login_waiting') return askForLoginFile(chatId);
+  if (data === 'login_help') return showLoginHelp(chatId);
+  if (data === 'start_screen') return start(chatId, env, null);
   const session = await getSession(chatId, env);
   if (!session) return askForLoginFile(chatId);
   const requiredPermission = permissionForCallback(data);
