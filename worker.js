@@ -4,7 +4,7 @@ const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BOT_VERSION = '3.2.0-encrypted-text-login';
+const BOT_VERSION = '3.3.0-file-login-bottom-keyboard';
 
 export default {
   async fetch(request, env, ctx) {
@@ -30,7 +30,7 @@ export default {
           { command:'start', description:'بدء البوت أو فتح الحساب' },
           { command:'menu', description:'القائمة الرئيسية' },
           { command:'check', description:'فحص ربط قاعدة أوسكار' },
-          { command:'login', description:'تسجيل الدخول بالنص المشفر' },
+          { command:'login', description:'تسجيل الدخول بملف .mzauth' },
           { command:'logout', description:'تسجيل الخروج' }
         ]});
         return json({ success: !!tg.ok, version: BOT_VERSION, webhook: webhookUrl, telegram: tg, commands });
@@ -162,20 +162,22 @@ async function processUpdate(update, env) {
 
   const text = String(msg.text || '').trim();
   if (text === '/logout' || text === '🚪 تسجيل خروج') return logout(chatId, env);
-  if (text === '/start' || text === '🏠 البداية') return start(chatId, env, msg);
-  if (text === '/login' || text === '🔐 تسجيل الدخول') return askForLoginText(chatId, env);
+  if (text === '/start' || text === '🏠 البداية' || text === '🏠 الرئيسية' || text === '🏠 القائمة الرئيسية') return startOrMenu(chatId, env, msg);
+  if (text === '/login' || text === '🔐 تسجيل الدخول') return askForLoginFile(chatId, env);
   if (text === 'ℹ️ طريقة الدخول') return showLoginHelp(chatId);
 
-  // تسجيل الدخول يتم الآن من النص المشفر الموجود داخل ملف mzauth.
-  // نبقي دعم إرسال الملف نفسه كخيار احتياطي فقط.
-  if (msg.document && /\.mzauth$/i.test(String(msg.document.file_name || ''))) {
-    return loginFromTelegramDocument(chatId, msg.document, env);
+  // تسجيل الدخول المعتمد: ملف أوسكار نفسه بامتداد .mzauth فقط.
+  if (msg.document) {
+    const fileName = String(msg.document.file_name || '');
+    if (/\.mzauth$/i.test(fileName)) return loginFromTelegramDocument(chatId, msg.document, env);
+    const pre = await getState(chatId, env);
+    if (pre.mode === 'LOGIN_FILE') return sendMessage(chatId, '⚠️ أرسل ملف الدخول الأصلي بامتداد <code>.mzauth</code> فقط.', loginFileKeyboard());
   }
 
   const preLoginState = await getState(chatId, env);
-  if (preLoginState.mode === 'LOGIN_TEXT') {
-    if (!text) return sendMessage(chatId, 'الصق النص المشفر الموجود داخل ملف <code>.mzauth</code> هنا.', loginTextButtons());
-    return loginFromEncryptedText(chatId, text, env);
+  if (preLoginState.mode === 'LOGIN_FILE') {
+    return sendMessage(chatId, '📎 أرسل ملف الدخول الأصلي <code>.mzauth</code> كمستند من زر المشبك 📎.
+لن يتم تسجيل الدخول قبل فحص الملف والتحقق من الشركة والحساب.', loginFileKeyboard());
   }
 
   const session = await getSession(chatId, env);
@@ -183,10 +185,14 @@ async function processUpdate(update, env) {
 
   if (text === '/check') return showConnectionCheck(chatId, session);
   if (text === '/menu') return showMainMenu(chatId, session);
+
+  // أزرار القائمة الدائمة تظهر أسفل خانة الكتابة وليس داخل المحادثة.
+  const bottomAction = bottomActionForText(text);
+  if (bottomAction) return handleCallback(chatId, bottomAction, env);
+
   const state = await getState(chatId, env);
   if (state.mode !== 'IDLE') return handleStateText(chatId, text, session, state, env, msg);
 
-  // Friendly text shortcuts in addition to buttons.
   if (/^(القائمة|menu|الرئيسية)$/i.test(text)) return showMainMenu(chatId, session);
   if (/بحث/i.test(text)) {
     await setState(chatId, 'GLOBAL_SEARCH', {}, env);
@@ -195,58 +201,72 @@ async function processUpdate(update, env) {
   return showMainMenu(chatId, session);
 }
 
+async function startOrMenu(chatId, env, msg) {
+  const session = await getSession(chatId, env);
+  if (session) return showMainMenu(chatId, session);
+  return start(chatId, env, msg);
+}
+
 async function start(chatId, env, msg) {
   const session = await getSession(chatId, env);
   if (session) return showMainMenu(chatId, session);
   await setState(chatId, 'IDLE', {}, env);
   const name = e(msg?.from?.first_name || 'مستخدم');
   return sendMessage(chatId,
-    `👋 أهلاً ${name}
-
-` +
-    `<b>أوسكار المحاسبي عبر تيليجرام</b>
-` +
-    `ادخل بنفس حساب أوسكار، وبعدها تظهر لك الأقسام والعمليات حسب صلاحيات حسابك.
-
-` +
-    `اضغط <b>تسجيل الدخول</b> للبدء.`,
-    startLoginButtons()
+    `👋 أهلاً ${name}\n\n` +
+    `<b>أوسكار المحاسبي عبر تيليجرام</b>\n` +
+    `سجّل الدخول بنفس ملف أوسكار <code>.mzauth</code>.\n` +
+    `بعد التحقق من الملف والشركة والحساب ستظهر لك وظائف أوسكار حسب صلاحياتك.\n\n` +
+    `استخدم الأزرار الثابتة أسفل خانة الكتابة.`,
+    startReplyKeyboard()
   );
 }
 
-function startLoginButtons() {
-  return { inline_keyboard: [
-    [btn('🔐 تسجيل الدخول', 'login_start')],
-    [btn('ℹ️ طريقة الدخول', 'login_help')]
-  ] };
+function startReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text:'🔐 تسجيل الدخول' }],
+      [{ text:'ℹ️ طريقة الدخول' }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'اختر من الأزرار بالأسفل'
+  };
 }
 
-async function askForLoginText(chatId, env) {
-  await setState(chatId, 'LOGIN_TEXT', {}, env);
+function loginFileKeyboard() {
+  return {
+    keyboard: [
+      [{ text:'🏠 البداية' }, { text:'ℹ️ طريقة الدخول' }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'أرسل ملف .mzauth من زر المشبك 📎'
+  };
+}
+
+async function askForLoginFile(chatId, env) {
+  await setState(chatId, 'LOGIN_FILE', {}, env);
   return sendMessage(chatId,
     '🔐 <b>تسجيل الدخول إلى أوسكار</b>\n\n' +
-    'افتح ملف الدخول <code>.mzauth</code> كنص، ثم <b>انسخ كل النص المشفر الموجود بداخله</b> والصقه هنا في رسالة واحدة.\n\n' +
-    'لا ترسل اسم الملف، ولا صورة، ولا تعدّل أي حرف من النص.',
-    loginTextButtons()
+    'أرسل <b>ملف الدخول الأصلي</b> الذي تستخدمه للدخول إلى برنامج أوسكار، بنفس امتداد <code>.mzauth</code>.\n\n' +
+    '📎 اضغط زر المشبك في تيليجرام ← ملف ← اختر ملف <code>.mzauth</code>.\n\n' +
+    'سيقوم البوت بفك الملف ثم التحقق من قاعدة الشركة وحالة التفعيل والحساب ونسخة ملف الدخول قبل قبول تسجيل الدخول.',
+    loginFileKeyboard()
   );
-}
-
-function loginTextButtons() {
-  return { inline_keyboard: [
-    [btn('ℹ️ كيف أنسخ النص؟', 'login_help')],
-    [btn('🏠 رجوع للبداية', 'start_screen')]
-  ] };
 }
 
 async function showLoginHelp(chatId) {
   return sendMessage(chatId,
-    'ℹ️ <b>طريقة تسجيل الدخول بالنص المشفر</b>\n\n' +
-    '1️⃣ افتح ملف <code>.mzauth</code> ببرنامج نصوص أو محرر.\n' +
-    '2️⃣ ستجد بداخله نصاً مشفراً طويلاً.\n' +
-    '3️⃣ اختر الكل وانسخ النص كاملاً.\n' +
-    '4️⃣ ارجع للبوت واضغط <b>تسجيل الدخول</b> ثم الصق النص كما هو.\n\n' +
-    'البوت يفك نفس صيغة ملف أوسكار ويربط نفس الشركة والحساب والصلاحيات.',
-    startLoginButtons()
+    'ℹ️ <b>طريقة تسجيل الدخول</b>\n\n' +
+    '1️⃣ اضغط <b>🔐 تسجيل الدخول</b> من الأزرار أسفل الشاشة.\n' +
+    '2️⃣ اضغط المشبك 📎 في تيليجرام واختر <b>ملف</b>.\n' +
+    '3️⃣ أرسل نفس ملف أوسكار الذي ينتهي بـ <code>.mzauth</code>.\n' +
+    '4️⃣ انتظر رسالة التحقق؛ البوت لا يقبل الملف إلا بعد فحص الشركة والحساب والصلاحية من قاعدة أوسكار.\n\n' +
+    'لا تنسخ النص الموجود داخل الملف، ولا تغيّر اسمه أو محتواه.',
+    startReplyKeyboard()
   );
 }
 
@@ -257,19 +277,20 @@ function cleanEncryptedLoginText(value) {
   if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) text = text.slice(1, -1).trim();
   text = text.replace(/^mzauth\s*[:=]\s*/i, '');
   text = text.replace(/\s+/g, '');
-  if (text.length < 80) throw new Error('النص المشفر قصير أو غير مكتمل. انسخ محتوى ملف mzauth بالكامل.');
-  if (!/^[A-Za-z0-9+/=_-]+$/.test(text)) throw new Error('النص يحتوي على أحرف غير صالحة. انسخه من داخل ملف mzauth بدون تعديل.');
+  if (text.length < 80) throw new Error('ملف الدخول قصير أو غير مكتمل. أرسل ملف .mzauth الأصلي.');
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(text)) throw new Error('محتوى ملف الدخول غير صالح أو تم تعديله. أرسل ملف .mzauth الأصلي.');
   return text;
 }
 
 async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) {
-  if (!options.statusAlreadySent) await sendMessage(chatId, '⏳ جاري فك النص المشفر وربطه بنفس حساب أوسكار...');
+  if (!options.statusAlreadySent) await sendMessage(chatId, '⏳ جاري فحص ملف أوسكار والتحقق من الحساب...', loginFileKeyboard());
   try {
     const opaque = cleanEncryptedLoginText(encryptedText);
     const rawPayload = await unpackActivationFile(opaque);
     const payload = normalizeActivationPayload(rawPayload);
-    const verified = await verifyActivationPayloadFlexible(payload);
+    const verified = await verifyActivationPayloadStrictWithRetry(payload, 3);
     if (verified?.account) payload.account = { ...(payload.account || {}), ...verified.account };
+    await probeOscarDatabaseAfterVerification(payload);
 
     // ابدأ من آخر حالة حالية حتى لا يرسل البوت الفواتير القديمة بعد أول دخول.
     const [invoiceCursor, purchaseCursor] = await Promise.all([
@@ -299,42 +320,72 @@ async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) 
         verified?.error ? String(verified.error).slice(0,500) : null, now
       ).run();
     await setState(chatId, 'IDLE', {}, env);
-    const verifyText = verified?.provisional ? '\n\n⚡ تم قبول النص، وسيُعاد التحقق من الصلاحية تلقائياً عند الاتصال.' : '';
+    const minStartedAt = Number(options.startedAt || 0);
+    if (minStartedAt > 0) {
+      const elapsed = Date.now() - minStartedAt;
+      if (elapsed < 2200) await sleep(2200 - elapsed);
+    }
+    const verifyText = '';
     await sendMessage(chatId,
       `✅ <b>تم تسجيل الدخول وربط الحساب</b>\n\n🏢 ${e(payload.companyName || 'الشركة')}\n👤 ${e(payload.account?.name || payload.account?.displayName || 'مستخدم')}\n🛡 ${e(payload.account?.roleName || payload.account?.role || (payload.type === 'company-manager' ? 'مدير الشركة' : 'حساب أوسكار'))}${verifyText}`
     );
     return showMainMenu(chatId, { payload });
   } catch (error) {
-    console.error('LOGIN_TEXT_ERROR', error);
-    await setState(chatId, 'LOGIN_TEXT', {}, env);
-    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\nالصق النص المشفر الكامل الموجود داخل ملف <code>.mzauth</code> وحاول مرة أخرى.`, loginTextButtons());
+    console.error('LOGIN_FILE_VERIFY_ERROR', error);
+    const minStartedAt = Number(options.startedAt || 0);
+    if (minStartedAt > 0) {
+      const elapsed = Date.now() - minStartedAt;
+      if (elapsed < 2200) await sleep(2200 - elapsed);
+    }
+    await setState(chatId, 'LOGIN_FILE', {}, env);
+    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\nأعد إرسال ملف الدخول الأصلي <code>.mzauth</code> بعد التأكد أنه نفس الملف الذي يعمل داخل أوسكار.`, loginFileKeyboard());
   }
 }
 
 async function loginFromTelegramDocument(chatId, doc, env) {
-  await sendMessage(chatId, '⏳ جاري قراءة ملف الدخول...');
+  const startedAt = Date.now();
+  const status = await sendMessage(chatId,
+    '⏳ <b>جاري التحقق من ملف الدخول...</b>\n\n' +
+    'يتم الآن فحص الملف، فك التشفير، مطابقة الشركة، حالة التفعيل، الحساب ونسخة ملف الدخول.\n' +
+    'انتظر حتى يكتمل التحقق.',
+    loginFileKeyboard()
+  );
   try {
     const fileName = String(doc?.file_name || '');
-    if (!/\.mzauth$/i.test(fileName)) throw new Error('أرسل ملف دخول أوسكار بصيغة .mzauth');
+    if (!/\.mzauth$/i.test(fileName)) throw new Error('امتداد الملف غير صحيح. المطلوب ملف .mzauth الأصلي.');
+    const fileSize = Number(doc?.file_size || 0);
+    if (fileSize && (fileSize < 100 || fileSize > 256 * 1024)) throw new Error('حجم ملف الدخول غير طبيعي. أرسل ملف .mzauth الأصلي من أوسكار.');
+
     const file = await telegram('getFile', { file_id: doc.file_id });
-    if (!file?.ok || !file.result?.file_path) throw new Error('تعذر تنزيل ملف الدخول من تيليجرام.');
+    if (!file?.ok || !file.result?.file_path) throw new Error('تعذر تنزيل ملف الدخول من تيليجرام. حاول مرة أخرى.');
     const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.result.file_path}`, { cache:'no-store' });
     if (!res.ok) throw new Error('فشل تنزيل ملف الدخول من تيليجرام.');
     const fileBytes = new Uint8Array(await res.arrayBuffer());
-    if (!fileBytes.length) throw new Error('ملف الدخول فارغ.');
+    if (fileBytes.length < 100) throw new Error('ملف الدخول فارغ أو غير مكتمل.');
+    if (fileBytes.length > 256 * 1024) throw new Error('ملف الدخول أكبر من الحجم المتوقع.');
+
     const opaque = activationFileAscii(fileBytes);
-    return loginFromEncryptedText(chatId, opaque, env, { statusAlreadySent: true });
+    // loginFromEncryptedText هنا دالة داخلية فقط لفك محتوى الملف بعد تنزيله؛ لا يوجد دخول بالنص من المستخدم.
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < 900) await sleep(900 - elapsed);
+    return loginFromEncryptedText(chatId, opaque, env, { statusAlreadySent: true, startedAt });
   } catch (error) {
-    console.error('LOGIN_FILE_FALLBACK_ERROR', error);
-    await setState(chatId, 'LOGIN_TEXT', {}, env);
-    return sendMessage(chatId, `❌ <b>تعذر قراءة الملف</b>\n\n${e(String(error?.message || error))}\n\nاستخدم زر تسجيل الدخول والصق النص المشفر الموجود داخل الملف مباشرة.`, loginTextButtons());
+    console.error('LOGIN_FILE_ERROR', error);
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < 1800) await sleep(1800 - elapsed);
+    await setState(chatId, 'LOGIN_FILE', {}, env);
+    return sendMessage(chatId,
+      `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\n` +
+      'أرسل نفس ملف <code>.mzauth</code> الذي تدخل به إلى برنامج أوسكار بدون تعديل.',
+      loginFileKeyboard()
+    );
   }
 }
 
 async function logout(chatId, env) {
   await env.DB.prepare('UPDATE telegram_sessions SET active=0,updated_at=? WHERE chat_id=?').bind(new Date().toISOString(), chatId).run();
   await setState(chatId, 'IDLE', {}, env);
-  return sendMessage(chatId, '🚪 تم تسجيل الخروج من حساب أوسكار.\n\nاضغط تسجيل الدخول للدخول بحساب آخر.', startLoginButtons());
+  return sendMessage(chatId, '🚪 تم تسجيل الخروج من حساب أوسكار.\n\nاضغط تسجيل الدخول من الأزرار أسفل الشاشة للدخول بحساب آخر.', startReplyKeyboard());
 }
 
 function hasPerm(session, key) {
@@ -372,36 +423,56 @@ async function showConnectionCheck(chatId,session){
 
 async function showMainMenu(chatId, session) {
   const p = session.payload || session;
-  const buttons = [];
-  const row = (...items) => buttons.push(items);
-  if (hasPerm(session, 'canAccessDashboard')) row(btn('📊 الرئيسية', 'dashboard'), btn('🔎 بحث شامل', 'global_search'));
-  if (hasPerm(session, 'canAccessCashier')) row(btn('🛒 بيع', 'sale'), btn('🧺 السلة', 'cart'));
-  if (hasPerm(session, 'canAccessSales')) row(btn('🧾 الفواتير', 'invoices'), btn('↩️ مرتجع بيع', 'return_new'));
-  if (hasPerm(session, 'canAccessProducts') || hasPerm(session, 'canAccessCashier')) row(btn('📦 الأصناف', 'products'), btn('🗂 الأقسام', 'categories'));
-  if (hasPerm(session, 'canAccessPurchases')) row(btn('🛍 المشتريات', 'purchases'), btn('➕ فاتورة شراء', 'purchase_new'));
-  if (hasPerm(session, 'canAccessCustomers')) row(btn('👥 العملاء', 'customers'), btn('➕ عميل', 'customer_new'));
-  if (hasPerm(session, 'canAccessCustomers')) row(btn('💳 ديون العملاء', 'customer_debts'));
-  if (hasPerm(session, 'canAccessSuppliers')) row(btn('🏭 الموردون', 'suppliers'), btn('➕ مورد', 'supplier_new'));
-  if (hasPerm(session, 'canAccessSuppliers')) row(btn('📒 حسابات الموردين', 'supplier_balances'));
-  if (hasPerm(session, 'canAccessAccounts')) row(btn('💰 الحسابات', 'accounts'), btn('🔄 تحويل مالي', 'account_transfer'));
-  if (hasPerm(session, 'canAccessAccounts')) row(btn('🕐 الورديات', 'shifts'), btn('🔓/🔒 الوردية', 'shift_action'));
-  if (hasPerm(session, 'canAccessVouchers')) row(btn('💵 السندات', 'vouchers'), btn('➕ سند جديد', 'voucher_new'));
-  if (hasPerm(session, 'canAccessExpenses')) row(btn('💸 المصروفات', 'expenses'), btn('➕ مصروف', 'expense_new'));
-  if (hasPerm(session, 'canAccessInventory')) row(btn('📚 المخزون', 'inventory'), btn('🔁 تحويل مخزون', 'stock_transfer'));
-  if (hasPerm(session, 'canAccessInventory')) row(btn('⚠️ النواقص', 'low_stock'));
-  if (hasPerm(session, 'canAccessEmployees')) row(btn('👨‍💼 الموظفون', 'employees'));
-  if (hasPerm(session, 'canAccessReports') || p.type === 'company-manager') row(btn('📈 التقارير', 'reports'));
-  row(btn('📋 المزيد', 'more'), btn('👤 حسابي', 'account'));
-  row(btn('🚪 تسجيل خروج', 'logout'));
   return sendMessage(chatId,
-    `🏠 <b>أوسكار المحاسبي — Telegram</b>\n🏢 ${e(p.companyName || 'الشركة')}\n👤 ${e(p.account?.name || p.account?.displayName || 'مستخدم')}\n\nاختر العملية:`,
-    { inline_keyboard: buttons }
+    `🏠 <b>أوسكار المحاسبي — Telegram</b>\n🏢 ${e(p.companyName || 'الشركة')}\n👤 ${e(p.account?.name || p.account?.displayName || 'مستخدم')}\n\nاختر العملية من الأزرار الثابتة أسفل خانة الكتابة:`,
+    mainReplyKeyboard(session)
   );
 }
 
+function mainReplyKeyboard(session) {
+  const rows = [];
+  const push = (...labels) => rows.push(labels.map(text => ({ text })));
+  if (hasPerm(session, 'canAccessDashboard')) push('📊 الرئيسية', '🔎 بحث شامل');
+  if (hasPerm(session, 'canAccessCashier')) push('🛒 بيع', '🧺 السلة');
+  if (hasPerm(session, 'canAccessSales')) push('🧾 الفواتير', '↩️ مرتجع بيع');
+  if (hasPerm(session, 'canAccessProducts') || hasPerm(session, 'canAccessCashier')) push('📦 الأصناف', '🗂 الأقسام');
+  if (hasPerm(session, 'canAccessPurchases')) push('🛍 المشتريات', '➕ فاتورة شراء');
+  if (hasPerm(session, 'canAccessCustomers')) { push('👥 العملاء', '➕ عميل'); push('💳 ديون العملاء'); }
+  if (hasPerm(session, 'canAccessSuppliers')) { push('🏭 الموردون', '➕ مورد'); push('📒 حسابات الموردين'); }
+  if (hasPerm(session, 'canAccessAccounts')) { push('💰 الحسابات', '🔄 تحويل مالي'); push('🕐 الورديات', '🔓/🔒 الوردية'); }
+  if (hasPerm(session, 'canAccessVouchers')) push('💵 السندات', '➕ سند جديد');
+  if (hasPerm(session, 'canAccessExpenses')) push('💸 المصروفات', '➕ مصروف');
+  if (hasPerm(session, 'canAccessInventory')) { push('📚 المخزون', '🔁 تحويل مخزون'); push('⚠️ النواقص'); }
+  if (hasPerm(session, 'canAccessEmployees')) push('👨‍💼 الموظفون');
+  if (hasPerm(session, 'canAccessReports') || (session.payload || session)?.type === 'company-manager') push('📈 التقارير');
+  push('📋 المزيد', '👤 حسابي');
+  push('🚪 تسجيل خروج');
+  return {
+    keyboard: rows,
+    resize_keyboard: true,
+    is_persistent: true,
+    one_time_keyboard: false,
+    input_field_placeholder: 'اختر عملية من أوسكار'
+  };
+}
+
+function bottomActionForText(text) {
+  const map = {
+    '📊 الرئيسية':'dashboard', '🔎 بحث شامل':'global_search', '🛒 بيع':'sale', '🧺 السلة':'cart',
+    '🧾 الفواتير':'invoices', '↩️ مرتجع بيع':'return_new', '📦 الأصناف':'products', '🗂 الأقسام':'categories',
+    '🛍 المشتريات':'purchases', '➕ فاتورة شراء':'purchase_new', '👥 العملاء':'customers', '➕ عميل':'customer_new',
+    '💳 ديون العملاء':'customer_debts', '🏭 الموردون':'suppliers', '➕ مورد':'supplier_new', '📒 حسابات الموردين':'supplier_balances',
+    '💰 الحسابات':'accounts', '🔄 تحويل مالي':'account_transfer', '🕐 الورديات':'shifts', '🔓/🔒 الوردية':'shift_action',
+    '💵 السندات':'vouchers', '➕ سند جديد':'voucher_new', '💸 المصروفات':'expenses', '➕ مصروف':'expense_new',
+    '📚 المخزون':'inventory', '🔁 تحويل مخزون':'stock_transfer', '⚠️ النواقص':'low_stock', '👨‍💼 الموظفون':'employees',
+    '📈 التقارير':'reports', '📋 المزيد':'more', '👤 حسابي':'account', '🏠 الرئيسية':'menu', '🏠 القائمة الرئيسية':'menu'
+  };
+  return map[String(text || '').trim()] || '';
+}
+
 function btn(text, callback_data) { return { text, callback_data }; }
-function mainMenuButton() { return { inline_keyboard: [[btn('🏠 القائمة الرئيسية', 'menu')]] }; }
-function backButton() { return { inline_keyboard: [[btn('⬅️ رجوع', 'menu')]] }; }
+function mainMenuButton() { return { keyboard: [[{text:'🏠 الرئيسية'}]], resize_keyboard:true, is_persistent:true, one_time_keyboard:false }; }
+function backButton() { return { keyboard: [[{text:'🏠 الرئيسية'}]], resize_keyboard:true, is_persistent:true, one_time_keyboard:false }; }
 
 function permissionForCallback(data){
   const d=String(data||'');
@@ -429,11 +500,11 @@ function permissionForCallback(data){
 }
 
 async function handleCallback(chatId, data, env) {
-  if (data === 'login_start' || data === 'login_waiting') return askForLoginText(chatId, env);
+  if (data === 'login_start' || data === 'login_waiting') return askForLoginFile(chatId, env);
   if (data === 'login_help') return showLoginHelp(chatId);
   if (data === 'start_screen') return start(chatId, env, null);
   const session = await getSession(chatId, env);
-  if (!session) return askForLoginText(chatId, env);
+  if (!session) return askForLoginFile(chatId, env);
   const requiredPermission = permissionForCallback(data);
   if (requiredPermission && !hasPerm(session, requiredPermission)) {
     return sendMessage(chatId, '⛔ ليس لديك صلاحية لتنفيذ هذه العملية.', mainMenuButton());
@@ -1266,6 +1337,38 @@ function validateActivationPayloadLocally(payload){
   if(!payload.database?.databaseURL||!payload.database?.authToken) throw new Error('ملف التفعيل لا يحتوي على قاعدة شركة صالحة.');
   if(!payload.account?.id) throw new Error('ملف الدخول لا يحتوي على حساب مستخدم صالح.');
   return {access:{status:'active',endAt:payload.expiresAt||'',companyId},online:false,provisional:true};
+}
+
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,Math.max(0,Number(ms)||0)))}
+
+function isTransientVerificationError(error){
+  const msg=String(error?.message||error||'');
+  return /fetch|network|timeout|aborted|AbortError|Turso HTTP (429|5\d\d)|خطأ SQL|تعذر الاتصال|temporar/i.test(msg);
+}
+
+async function verifyActivationPayloadStrictWithRetry(payload, attempts=3){
+  let lastError=null;
+  for(let i=0;i<Math.max(1,attempts);i++){
+    try{return await verifyActivationPayload(payload)}
+    catch(error){
+      lastError=error;
+      if(isLogicalVerificationError(error)) throw error;
+      if(!isTransientVerificationError(error) || i===attempts-1) break;
+      await sleep(650 + i*650);
+    }
+  }
+  throw new Error(`تعذر التحقق من ملف الدخول من قاعدة أوسكار الآن. ${String(lastError?.message||lastError||'').slice(0,180)}`);
+}
+
+async function probeOscarDatabaseAfterVerification(payload){
+  const [invoiceRev,purchaseRev,settingsRows] = await Promise.all([
+    remoteStoreMaxRev(payload,'invoices'),
+    remoteStoreMaxRev(payload,'purchases'),
+    readStore(payload,'settings')
+  ]);
+  if(!Number.isFinite(Number(invoiceRev)) || !Number.isFinite(Number(purchaseRev))) throw new Error('تعذر قراءة حالة المزامنة من قاعدة أوسكار.');
+  if(!Array.isArray(settingsRows)) throw new Error('تعذر قراءة إعدادات الشركة من قاعدة أوسكار.');
+  return true;
 }
 
 async function verifyActivationPayloadFlexible(payload){
