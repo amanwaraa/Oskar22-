@@ -4,7 +4,7 @@ const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BOT_VERSION = '3.1.0-start-login-buttons';
+const BOT_VERSION = '3.2.0-encrypted-text-login';
 
 export default {
   async fetch(request, env, ctx) {
@@ -30,7 +30,7 @@ export default {
           { command:'start', description:'بدء البوت أو فتح الحساب' },
           { command:'menu', description:'القائمة الرئيسية' },
           { command:'check', description:'فحص ربط قاعدة أوسكار' },
-          { command:'login', description:'فتح شاشة تسجيل الدخول' },
+          { command:'login', description:'تسجيل الدخول بالنص المشفر' },
           { command:'logout', description:'تسجيل الخروج' }
         ]});
         return json({ success: !!tg.ok, version: BOT_VERSION, webhook: webhookUrl, telegram: tg, commands });
@@ -163,11 +163,19 @@ async function processUpdate(update, env) {
   const text = String(msg.text || '').trim();
   if (text === '/logout' || text === '🚪 تسجيل خروج') return logout(chatId, env);
   if (text === '/start' || text === '🏠 البداية') return start(chatId, env, msg);
-  if (text === '/login' || text === '🔐 تسجيل الدخول') return askForLoginFile(chatId);
+  if (text === '/login' || text === '🔐 تسجيل الدخول') return askForLoginText(chatId, env);
   if (text === 'ℹ️ طريقة الدخول') return showLoginHelp(chatId);
 
+  // تسجيل الدخول يتم الآن من النص المشفر الموجود داخل ملف mzauth.
+  // نبقي دعم إرسال الملف نفسه كخيار احتياطي فقط.
   if (msg.document && /\.mzauth$/i.test(String(msg.document.file_name || ''))) {
     return loginFromTelegramDocument(chatId, msg.document, env);
+  }
+
+  const preLoginState = await getState(chatId, env);
+  if (preLoginState.mode === 'LOGIN_TEXT') {
+    if (!text) return sendMessage(chatId, 'الصق النص المشفر الموجود داخل ملف <code>.mzauth</code> هنا.', loginTextButtons());
+    return loginFromEncryptedText(chatId, text, env);
   }
 
   const session = await getSession(chatId, env);
@@ -190,6 +198,7 @@ async function processUpdate(update, env) {
 async function start(chatId, env, msg) {
   const session = await getSession(chatId, env);
   if (session) return showMainMenu(chatId, session);
+  await setState(chatId, 'IDLE', {}, env);
   const name = e(msg?.from?.first_name || 'مستخدم');
   return sendMessage(chatId,
     `👋 أهلاً ${name}
@@ -212,59 +221,57 @@ function startLoginButtons() {
   ] };
 }
 
-async function askForLoginFile(chatId) {
+async function askForLoginText(chatId, env) {
+  await setState(chatId, 'LOGIN_TEXT', {}, env);
   return sendMessage(chatId,
-    '🔐 <b>تسجيل الدخول إلى أوسكار</b>
-
-' +
-    '1️⃣ اضغط علامة المشبك 📎 بجانب مربع الكتابة.
-' +
-    '2️⃣ اختر <b>ملف</b>.
-' +
-    '3️⃣ أرسل نفس ملف <code>.mzauth</code> الذي تستخدمه للدخول إلى برنامج أوسكار.
-
-' +
-    'بمجرد إرسال الملف سأقرأه وأسجل الحساب تلقائياً.',
-    { inline_keyboard: [
-      [btn('📎 جاهز لإرسال ملف الدخول', 'login_waiting')],
-      [btn('🏠 رجوع للبداية', 'start_screen')]
-    ] }
+    '🔐 <b>تسجيل الدخول إلى أوسكار</b>\n\n' +
+    'افتح ملف الدخول <code>.mzauth</code> كنص، ثم <b>انسخ كل النص المشفر الموجود بداخله</b> والصقه هنا في رسالة واحدة.\n\n' +
+    'لا ترسل اسم الملف، ولا صورة، ولا تعدّل أي حرف من النص.',
+    loginTextButtons()
   );
+}
+
+function loginTextButtons() {
+  return { inline_keyboard: [
+    [btn('ℹ️ كيف أنسخ النص؟', 'login_help')],
+    [btn('🏠 رجوع للبداية', 'start_screen')]
+  ] };
 }
 
 async function showLoginHelp(chatId) {
   return sendMessage(chatId,
-    'ℹ️ <b>طريقة تسجيل الدخول</b>
-
-' +
-    'افتح برنامج أوسكار ونزّل ملف دخول المدير أو الموظف بصيغة <code>.mzauth</code>.
-' +
-    'بعدها ارجع للبوت واضغط <b>تسجيل الدخول</b> ثم أرسل الملف كمستند، وليس صورة.
-
-' +
-    'كل حساب يدخل بنفس صلاحياته الموجودة في أوسكار.',
+    'ℹ️ <b>طريقة تسجيل الدخول بالنص المشفر</b>\n\n' +
+    '1️⃣ افتح ملف <code>.mzauth</code> ببرنامج نصوص أو محرر.\n' +
+    '2️⃣ ستجد بداخله نصاً مشفراً طويلاً.\n' +
+    '3️⃣ اختر الكل وانسخ النص كاملاً.\n' +
+    '4️⃣ ارجع للبوت واضغط <b>تسجيل الدخول</b> ثم الصق النص كما هو.\n\n' +
+    'البوت يفك نفس صيغة ملف أوسكار ويربط نفس الشركة والحساب والصلاحيات.',
     startLoginButtons()
   );
 }
 
-async function loginFromTelegramDocument(chatId, doc, env) {
-  await sendMessage(chatId, '⏳ جاري قراءة ملف الدخول وربطه بنفس حساب أوسكار...');
+function cleanEncryptedLoginText(value) {
+  let text = String(value || '').trim();
+  // السماح بالنسخ من code block أو محرر يضيف علامات اقتباس.
+  text = text.replace(/^```(?:text|txt|base64)?\s*/i, '').replace(/```$/i, '').trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) text = text.slice(1, -1).trim();
+  text = text.replace(/^mzauth\s*[:=]\s*/i, '');
+  text = text.replace(/\s+/g, '');
+  if (text.length < 80) throw new Error('النص المشفر قصير أو غير مكتمل. انسخ محتوى ملف mzauth بالكامل.');
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(text)) throw new Error('النص يحتوي على أحرف غير صالحة. انسخه من داخل ملف mzauth بدون تعديل.');
+  return text;
+}
+
+async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) {
+  if (!options.statusAlreadySent) await sendMessage(chatId, '⏳ جاري فك النص المشفر وربطه بنفس حساب أوسكار...');
   try {
-    const fileName = String(doc?.file_name || '');
-    if (!/\.mzauth$/i.test(fileName)) throw new Error('أرسل ملف دخول أوسكار بصيغة .mzauth');
-    const file = await telegram('getFile', { file_id: doc.file_id });
-    if (!file?.ok || !file.result?.file_path) throw new Error('تعذر تنزيل ملف الدخول من تيليجرام.');
-    const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.result.file_path}`, { cache:'no-store' });
-    if (!res.ok) throw new Error('فشل تنزيل ملف الدخول من تيليجرام.');
-    const fileBytes = new Uint8Array(await res.arrayBuffer());
-    if (!fileBytes.length) throw new Error('ملف الدخول فارغ.');
-    const opaque = activationFileAscii(fileBytes);
+    const opaque = cleanEncryptedLoginText(encryptedText);
     const rawPayload = await unpackActivationFile(opaque);
     const payload = normalizeActivationPayload(rawPayload);
     const verified = await verifyActivationPayloadFlexible(payload);
     if (verified?.account) payload.account = { ...(payload.account || {}), ...verified.account };
 
-    // Start cursors from the current cloud state so login does not flood Telegram with old invoices.
+    // ابدأ من آخر حالة حالية حتى لا يرسل البوت الفواتير القديمة بعد أول دخول.
     const [invoiceCursor, purchaseCursor] = await Promise.all([
       remoteStoreMaxRev(payload, 'invoices').catch(()=>-1),
       remoteStoreMaxRev(payload, 'purchases').catch(()=>-1)
@@ -292,24 +299,35 @@ async function loginFromTelegramDocument(chatId, doc, env) {
         verified?.error ? String(verified.error).slice(0,500) : null, now
       ).run();
     await setState(chatId, 'IDLE', {}, env);
-    const verifyText = verified?.provisional ? '\n\n⚡ تم قبول الملف، وسيُعاد التحقق من الصلاحية تلقائياً عند الاتصال.' : '';
+    const verifyText = verified?.provisional ? '\n\n⚡ تم قبول النص، وسيُعاد التحقق من الصلاحية تلقائياً عند الاتصال.' : '';
     await sendMessage(chatId,
       `✅ <b>تم تسجيل الدخول وربط الحساب</b>\n\n🏢 ${e(payload.companyName || 'الشركة')}\n👤 ${e(payload.account?.name || payload.account?.displayName || 'مستخدم')}\n🛡 ${e(payload.account?.roleName || payload.account?.role || (payload.type === 'company-manager' ? 'مدير الشركة' : 'حساب أوسكار'))}${verifyText}`
     );
     return showMainMenu(chatId, { payload });
   } catch (error) {
-    console.error('LOGIN_ERROR', error);
-    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>
+    console.error('LOGIN_TEXT_ERROR', error);
+    await setState(chatId, 'LOGIN_TEXT', {}, env);
+    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\nالصق النص المشفر الكامل الموجود داخل ملف <code>.mzauth</code> وحاول مرة أخرى.`, loginTextButtons());
+  }
+}
 
-${e(String(error?.message || error))}
-
-اضغط تسجيل الدخول وحاول إرسال ملف <code>.mzauth</code> مرة أخرى.`, {
-      inline_keyboard:[
-        [btn('🔐 تسجيل الدخول','login_start')],
-        [btn('ℹ️ طريقة الدخول','login_help')]
-      ]
-    });
-
+async function loginFromTelegramDocument(chatId, doc, env) {
+  await sendMessage(chatId, '⏳ جاري قراءة ملف الدخول...');
+  try {
+    const fileName = String(doc?.file_name || '');
+    if (!/\.mzauth$/i.test(fileName)) throw new Error('أرسل ملف دخول أوسكار بصيغة .mzauth');
+    const file = await telegram('getFile', { file_id: doc.file_id });
+    if (!file?.ok || !file.result?.file_path) throw new Error('تعذر تنزيل ملف الدخول من تيليجرام.');
+    const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.result.file_path}`, { cache:'no-store' });
+    if (!res.ok) throw new Error('فشل تنزيل ملف الدخول من تيليجرام.');
+    const fileBytes = new Uint8Array(await res.arrayBuffer());
+    if (!fileBytes.length) throw new Error('ملف الدخول فارغ.');
+    const opaque = activationFileAscii(fileBytes);
+    return loginFromEncryptedText(chatId, opaque, env, { statusAlreadySent: true });
+  } catch (error) {
+    console.error('LOGIN_FILE_FALLBACK_ERROR', error);
+    await setState(chatId, 'LOGIN_TEXT', {}, env);
+    return sendMessage(chatId, `❌ <b>تعذر قراءة الملف</b>\n\n${e(String(error?.message || error))}\n\nاستخدم زر تسجيل الدخول والصق النص المشفر الموجود داخل الملف مباشرة.`, loginTextButtons());
   }
 }
 
@@ -411,11 +429,11 @@ function permissionForCallback(data){
 }
 
 async function handleCallback(chatId, data, env) {
-  if (data === 'login_start' || data === 'login_waiting') return askForLoginFile(chatId);
+  if (data === 'login_start' || data === 'login_waiting') return askForLoginText(chatId, env);
   if (data === 'login_help') return showLoginHelp(chatId);
   if (data === 'start_screen') return start(chatId, env, null);
   const session = await getSession(chatId, env);
-  if (!session) return askForLoginFile(chatId);
+  if (!session) return askForLoginText(chatId, env);
   const requiredPermission = permissionForCallback(data);
   if (requiredPermission && !hasPerm(session, requiredPermission)) {
     return sendMessage(chatId, '⛔ ليس لديك صلاحية لتنفيذ هذه العملية.', mainMenuButton());
