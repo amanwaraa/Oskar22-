@@ -4,7 +4,7 @@ const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BOT_VERSION = '3.3.0-file-login-bottom-keyboard';
+const BOT_VERSION = '3.4.0-message-recovery-file-login';
 
 export default {
   async fetch(request, env, ctx) {
@@ -21,6 +21,9 @@ export default {
       if (request.method === 'GET' && url.pathname === '/setup') {
         await ensureD1(env);
         const webhookUrl = `${url.origin}/webhook`;
+        const bot = await telegram('getMe', {});
+        const deleted = await telegram('deleteWebhook', { drop_pending_updates: false });
+        await sleep(250);
         const tg = await telegram('setWebhook', {
           url: webhookUrl,
           allowed_updates: ['message', 'callback_query'],
@@ -33,7 +36,7 @@ export default {
           { command:'login', description:'تسجيل الدخول بملف .mzauth' },
           { command:'logout', description:'تسجيل الخروج' }
         ]});
-        return json({ success: !!tg.ok, version: BOT_VERSION, webhook: webhookUrl, telegram: tg, commands });
+        return json({ success: !!tg.ok && !!bot.ok, version: BOT_VERSION, webhook: webhookUrl, bot, deleted, telegram: tg, commands });
       }
 
       if (request.method === 'GET' && url.pathname === '/status') {
@@ -72,9 +75,21 @@ export default {
       }
 
       if (request.method === 'POST' && url.pathname === '/webhook') {
-        await ensureD1(env);
         const update = await request.json();
-        ctx.waitUntil(processUpdate(update, env));
+        const task = (async () => {
+          try {
+            await ensureD1(env);
+            await processUpdate(update, env);
+          } catch (error) {
+            console.error('UPDATE_PROCESS_ERROR', error);
+            const chatId = String(update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || update?.callback_query?.from?.id || '');
+            if (chatId) {
+              try { await sendMessage(chatId, '⚠️ حصل خطأ مؤقت داخل البوت. أعد المحاولة بعد لحظات.', startReplyKeyboard()); }
+              catch (sendError) { console.error('UPDATE_ERROR_FALLBACK_SEND_FAILED', sendError); }
+            }
+          }
+        })();
+        ctx.waitUntil(task);
         return new Response('OK');
       }
 
@@ -176,8 +191,7 @@ async function processUpdate(update, env) {
 
   const preLoginState = await getState(chatId, env);
   if (preLoginState.mode === 'LOGIN_FILE') {
-    return sendMessage(chatId, '📎 أرسل ملف الدخول الأصلي <code>.mzauth</code> كمستند من زر المشبك 📎.
-لن يتم تسجيل الدخول قبل فحص الملف والتحقق من الشركة والحساب.', loginFileKeyboard());
+    return sendMessage(chatId, '📎 أرسل ملف الدخول الأصلي <code>.mzauth</code> كمستند من زر المشبك 📎.\nلن يتم تسجيل الدخول قبل فحص الملف والتحقق من الشركة والحساب.', loginFileKeyboard());
   }
 
   const session = await getSession(chatId, env);
@@ -202,15 +216,17 @@ async function processUpdate(update, env) {
 }
 
 async function startOrMenu(chatId, env, msg) {
-  const session = await getSession(chatId, env);
+  let session = null;
+  try { session = await getSession(chatId, env); } catch (error) { console.warn('START_MENU_SESSION_READ_FAILED', String(error?.message || error)); }
   if (session) return showMainMenu(chatId, session);
   return start(chatId, env, msg);
 }
 
 async function start(chatId, env, msg) {
-  const session = await getSession(chatId, env);
+  let session = null;
+  try { session = await getSession(chatId, env); } catch (error) { console.warn('START_SESSION_READ_FAILED', String(error?.message || error)); }
   if (session) return showMainMenu(chatId, session);
-  await setState(chatId, 'IDLE', {}, env);
+  try { await setState(chatId, 'IDLE', {}, env); } catch (error) { console.warn('START_STATE_WRITE_FAILED', String(error?.message || error)); }
   const name = e(msg?.from?.first_name || 'مستخدم');
   return sendMessage(chatId,
     `👋 أهلاً ${name}\n\n` +
@@ -229,9 +245,7 @@ function startReplyKeyboard() {
       [{ text:'ℹ️ طريقة الدخول' }]
     ],
     resize_keyboard: true,
-    is_persistent: true,
-    one_time_keyboard: false,
-    input_field_placeholder: 'اختر من الأزرار بالأسفل'
+    one_time_keyboard: false
   };
 }
 
@@ -241,9 +255,7 @@ function loginFileKeyboard() {
       [{ text:'🏠 البداية' }, { text:'ℹ️ طريقة الدخول' }]
     ],
     resize_keyboard: true,
-    is_persistent: true,
-    one_time_keyboard: false,
-    input_field_placeholder: 'أرسل ملف .mzauth من زر المشبك 📎'
+    one_time_keyboard: false
   };
 }
 
@@ -450,9 +462,7 @@ function mainReplyKeyboard(session) {
   return {
     keyboard: rows,
     resize_keyboard: true,
-    is_persistent: true,
-    one_time_keyboard: false,
-    input_field_placeholder: 'اختر عملية من أوسكار'
+    one_time_keyboard: false
   };
 }
 
@@ -471,8 +481,8 @@ function bottomActionForText(text) {
 }
 
 function btn(text, callback_data) { return { text, callback_data }; }
-function mainMenuButton() { return { keyboard: [[{text:'🏠 الرئيسية'}]], resize_keyboard:true, is_persistent:true, one_time_keyboard:false }; }
-function backButton() { return { keyboard: [[{text:'🏠 الرئيسية'}]], resize_keyboard:true, is_persistent:true, one_time_keyboard:false }; }
+function mainMenuButton() { return { keyboard: [[{text:'🏠 الرئيسية'}]], resize_keyboard:true, one_time_keyboard:false }; }
+function backButton() { return { keyboard: [[{text:'🏠 الرئيسية'}]], resize_keyboard:true, one_time_keyboard:false }; }
 
 function permissionForCallback(data){
   const d=String(data||'');
@@ -1540,14 +1550,53 @@ async function sendMessage(chatId,text,replyMarkup=null){
   if(cur||!parts.length)parts.push(cur||' ');
   let last=null;
   for(let i=0;i<parts.length;i++){
-    const body={chat_id:chatId,text:parts[i],parse_mode:'HTML',disable_web_page_preview:true};
-    if(replyMarkup&&i===parts.length-1)body.reply_markup=replyMarkup;
+    const body={chat_id:String(chatId),text:parts[i],parse_mode:'HTML',disable_web_page_preview:true};
+    if(replyMarkup&&i===parts.length-1) body.reply_markup=sanitizeReplyMarkup(replyMarkup);
     last=await telegram('sendMessage',body);
-    if(!last?.ok)break;
+    if(!last?.ok&&body.reply_markup){
+      console.warn('TELEGRAM_REPLY_MARKUP_REJECTED',last?.description||last);
+      const fallback={...body};delete fallback.reply_markup;
+      last=await telegram('sendMessage',fallback);
+    }
+    if(!last?.ok){
+      console.error('TELEGRAM_SEND_FAILED',last?.description||last);
+      break;
+    }
   }
   return last;
 }
-async function telegram(method,data={}){const res=await fetch(`${TG_API}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});return res.json()}
+function sanitizeReplyMarkup(markup){
+  if(!markup||typeof markup!=='object')return null;
+  if(Array.isArray(markup.keyboard)){
+    return {
+      keyboard:markup.keyboard.map(row=>(Array.isArray(row)?row:[]).map(btn=>({text:String(btn?.text||btn||'')})).filter(btn=>btn.text)).filter(row=>row.length),
+      resize_keyboard:markup.resize_keyboard!==false,
+      one_time_keyboard:!!markup.one_time_keyboard
+    };
+  }
+  if(Array.isArray(markup.inline_keyboard))return {inline_keyboard:markup.inline_keyboard};
+  if(markup.remove_keyboard)return {remove_keyboard:true};
+  return markup;
+}
+async function telegram(method,data={}){
+  let lastError=null;
+  for(let attempt=0;attempt<2;attempt++){
+    try{
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),12000);
+      const res=await fetch(`${TG_API}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:controller.signal});
+      clearTimeout(timer);
+      const raw=await res.text();
+      let out=null;
+      try{out=JSON.parse(raw)}catch(_){out={ok:false,error_code:res.status,description:raw||`Telegram HTTP ${res.status}`}}
+      if(out?.ok)return out;
+      lastError=out;
+      if(res.status<500&&res.status!==429)return out;
+    }catch(error){lastError={ok:false,description:String(error?.message||error)}}
+    if(attempt===0)await sleep(350);
+  }
+  return lastError||{ok:false,description:'Telegram request failed'};
+}
 function json(data,status=200){return new Response(JSON.stringify(data,null,2),{status,headers:{'Content-Type':'application/json; charset=UTF-8',...corsHeaders()}})}
 function corsHeaders(){return{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type'}}
 function e(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}

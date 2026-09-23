@@ -1,6 +1,6 @@
 {
   "name": "telegram-bot-oscar",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy"
