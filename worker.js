@@ -4,7 +4,7 @@ const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BOT_VERSION = '3.4.0-message-recovery-file-login';
+const BOT_VERSION = '3.5.0-webhook-self-heal-start-fixed';
 
 export default {
   async fetch(request, env, ctx) {
@@ -13,30 +13,27 @@ export default {
       if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
 
       if (request.method === 'GET' && url.pathname === '/') {
-        return new Response('Oscar Telegram Bot Worker is running ✅', {
-          headers: { 'Content-Type': 'text/plain; charset=UTF-8' }
+        // فتح رابط الـ Worker مرة واحدة يكفي لإصلاح الـ webhook تلقائياً.
+        // لا نعتمد على D1 هنا حتى لا يتوقف ربط تيليجرام بسبب مشكلة قاعدة الجلسات.
+        const setup = await repairTelegramWebhook(url.origin);
+        let d1 = { ok:true };
+        try { await ensureD1(env); } catch (error) { d1 = { ok:false, error:String(error?.message || error) }; }
+        return json({
+          ok: !!setup?.telegram?.ok,
+          version: BOT_VERSION,
+          message: setup?.telegram?.ok ? 'Oscar Telegram Bot is connected ✅' : 'Worker is running, but Telegram webhook needs attention',
+          webhook: setup?.webhookUrl,
+          telegram: setup?.telegram,
+          bot: setup?.bot,
+          d1
         });
       }
 
       if (request.method === 'GET' && url.pathname === '/setup') {
-        await ensureD1(env);
-        const webhookUrl = `${url.origin}/webhook`;
-        const bot = await telegram('getMe', {});
-        const deleted = await telegram('deleteWebhook', { drop_pending_updates: false });
-        await sleep(250);
-        const tg = await telegram('setWebhook', {
-          url: webhookUrl,
-          allowed_updates: ['message', 'callback_query'],
-          drop_pending_updates: false
-        });
-        const commands = await telegram('setMyCommands', { commands: [
-          { command:'start', description:'بدء البوت أو فتح الحساب' },
-          { command:'menu', description:'القائمة الرئيسية' },
-          { command:'check', description:'فحص ربط قاعدة أوسكار' },
-          { command:'login', description:'تسجيل الدخول بملف .mzauth' },
-          { command:'logout', description:'تسجيل الخروج' }
-        ]});
-        return json({ success: !!tg.ok && !!bot.ok, version: BOT_VERSION, webhook: webhookUrl, bot, deleted, telegram: tg, commands });
+        const setup = await repairTelegramWebhook(url.origin);
+        let d1 = { ok:true };
+        try { await ensureD1(env); } catch (error) { d1 = { ok:false, error:String(error?.message || error) }; }
+        return json({ success: !!setup?.telegram?.ok && !!setup?.bot?.ok, version: BOT_VERSION, ...setup, d1 });
       }
 
       if (request.method === 'GET' && url.pathname === '/status') {
@@ -74,22 +71,18 @@ export default {
         return json({ ok: true, sent });
       }
 
-      if (request.method === 'POST' && url.pathname === '/webhook') {
-        const update = await request.json();
-        const task = (async () => {
-          try {
-            await ensureD1(env);
-            await processUpdate(update, env);
-          } catch (error) {
-            console.error('UPDATE_PROCESS_ERROR', error);
-            const chatId = String(update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || update?.callback_query?.from?.id || '');
-            if (chatId) {
-              try { await sendMessage(chatId, '⚠️ حصل خطأ مؤقت داخل البوت. أعد المحاولة بعد لحظات.', startReplyKeyboard()); }
-              catch (sendError) { console.error('UPDATE_ERROR_FALLBACK_SEND_FAILED', sendError); }
-            }
-          }
-        })();
-        ctx.waitUntil(task);
+      // ندعم /webhook وأيضاً / لأن بعض النسخ القديمة سجلت webhook على رابط الـ Worker نفسه.
+      // بهذا لا يتوقف /start بعد رفع نسخة جديدة حتى قبل زيارة /setup.
+      if (request.method === 'POST' && (url.pathname === '/webhook' || url.pathname === '/' || url.pathname === '/telegram' || url.pathname === '/bot')) {
+        let update = null;
+        try { update = await request.json(); } catch (_) { return new Response('OK'); }
+        if (!isTelegramUpdate(update)) return new Response('OK');
+
+        const isStart = String(update?.message?.text || '').trim() === '/start';
+        const task = processTelegramUpdateSafe(update, env);
+        // /start لازم يرد قبل إغلاق الطلب؛ باقي العمليات قد تكون طويلة فنتركها في الخلفية.
+        if (isStart) await task;
+        else ctx.waitUntil(task);
         return new Response('OK');
       }
 
@@ -110,6 +103,60 @@ export default {
     })());
   }
 };
+
+function isTelegramUpdate(update) {
+  return !!(update && typeof update === 'object' && (update.update_id != null || update.message || update.callback_query));
+}
+
+async function repairTelegramWebhook(origin) {
+  const webhookUrl = `${String(origin || '').replace(/\/$/, '')}/webhook`;
+  const bot = await telegram('getMe', {});
+  if (!bot?.ok) return { webhookUrl, bot, telegram:{ ok:false, description:bot?.description || 'BOT_TOKEN_INVALID' } };
+  // setWebhook وحده يكفي ويستبدل الرابط السابق؛ لا نحذف أولاً حتى لا نصنع فجوة بدون webhook.
+  const tg = await telegram('setWebhook', {
+    url: webhookUrl,
+    allowed_updates: ['message', 'callback_query'],
+    drop_pending_updates: false
+  });
+  let commands = null;
+  if (tg?.ok) {
+    commands = await telegram('setMyCommands', { commands: [
+      { command:'start', description:'بدء البوت أو فتح الحساب' },
+      { command:'menu', description:'القائمة الرئيسية' },
+      { command:'check', description:'فحص ربط قاعدة أوسكار' },
+      { command:'login', description:'تسجيل الدخول بملف .mzauth' },
+      { command:'logout', description:'تسجيل الخروج' }
+    ]});
+  }
+  return { webhookUrl, bot, telegram:tg, commands };
+}
+
+async function processTelegramUpdateSafe(update, env) {
+  try {
+    await ensureD1(env);
+    await processUpdate(update, env);
+  } catch (error) {
+    console.error('UPDATE_PROCESS_ERROR', error);
+    const chatId = String(update?.message?.chat?.id || update?.callback_query?.message?.chat?.id || update?.callback_query?.from?.id || '');
+    if (!chatId) return;
+    const isStart = String(update?.message?.text || '').trim() === '/start';
+    try {
+      if (isStart) {
+        const name = e(update?.message?.from?.first_name || 'مستخدم');
+        await sendMessage(chatId,
+          `👋 أهلاً ${name}\n\n` +
+          `<b>أوسكار المحاسبي عبر تيليجرام</b>\n` +
+          `اضغط <b>🔐 تسجيل الدخول</b> من الأزرار أسفل خانة الكتابة ثم أرسل ملف <code>.mzauth</code>.`,
+          startReplyKeyboard()
+        );
+      } else {
+        await sendMessage(chatId, '⚠️ حصل خطأ مؤقت داخل البوت. جرّب مرة ثانية.', startReplyKeyboard());
+      }
+    } catch (sendError) {
+      console.error('UPDATE_ERROR_FALLBACK_SEND_FAILED', sendError);
+    }
+  }
+}
 
 async function ensureD1(env) {
   await env.DB.batch([
