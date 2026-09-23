@@ -35,3 +35,20 @@ CREATE TABLE IF NOT EXISTS telegram_deliveries (
 CREATE INDEX IF NOT EXISTS idx_tg_sessions_company ON telegram_sessions(company_id,active);
 CREATE INDEX IF NOT EXISTS idx_tg_sessions_account ON telegram_sessions(company_id,account_id,active);
 CREATE INDEX IF NOT EXISTS idx_tg_deliveries_chat ON telegram_deliveries(chat_id,sent_at);
+
+CREATE TABLE IF NOT EXISTS telegram_supervisors (
+  chat_id TEXT PRIMARY KEY,
+  display_name TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS telegram_master_config (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  database_url TEXT NOT NULL,
+  auth_token_enc TEXT NOT NULL,
+  table_name TEXT NOT NULL DEFAULT 'oscar_rtdb',
+  admin_root_path TEXT NOT NULL DEFAULT 'oscar/admin',
+  updated_at TEXT NOT NULL
+);

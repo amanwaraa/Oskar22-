@@ -4,7 +4,7 @@ const APP_TAG = 'OSCAR_ACCOUNTING_ACTIVATION_V1';
 const ACTIVATION_WRAP_KEY = ['AM','_8Q','2x','!m','7Z','b4','_r','9P','@k','5N'].join('');
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const BOT_VERSION = '3.5.0-webhook-self-heal-start-fixed';
+const BOT_VERSION = '3.6.0-auth-master-supervisor';
 
 export default {
   async fetch(request, env, ctx) {
@@ -125,6 +125,7 @@ async function repairTelegramWebhook(origin) {
       { command:'menu', description:'القائمة الرئيسية' },
       { command:'check', description:'فحص ربط قاعدة أوسكار' },
       { command:'login', description:'تسجيل الدخول بملف .mzauth' },
+      { command:'supervisor', description:'لوحة المشرف والقاعدة الأم' },
       { command:'logout', description:'تسجيل الخروج' }
     ]});
   }
@@ -191,6 +192,21 @@ async function ensureD1(env) {
       entity_id TEXT NOT NULL,
       sent_at TEXT NOT NULL
     )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_supervisors (
+      chat_id TEXT PRIMARY KEY,
+      display_name TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_master_config (
+      id INTEGER PRIMARY KEY CHECK(id=1),
+      database_url TEXT NOT NULL,
+      auth_token_enc TEXT NOT NULL,
+      table_name TEXT NOT NULL DEFAULT 'oscar_rtdb',
+      admin_root_path TEXT NOT NULL DEFAULT 'oscar/admin',
+      updated_at TEXT NOT NULL
+    )`),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_sessions_company ON telegram_sessions(company_id,active)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_sessions_account ON telegram_sessions(company_id,account_id,active)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tg_deliveries_chat ON telegram_deliveries(chat_id,sent_at)')
@@ -227,6 +243,13 @@ async function processUpdate(update, env) {
   if (text === '/start' || text === '🏠 البداية' || text === '🏠 الرئيسية' || text === '🏠 القائمة الرئيسية') return startOrMenu(chatId, env, msg);
   if (text === '/login' || text === '🔐 تسجيل الدخول') return askForLoginFile(chatId, env);
   if (text === 'ℹ️ طريقة الدخول') return showLoginHelp(chatId);
+  if (text === '/supervisor' || text === '🛡 المشرف') return openSupervisor(chatId, env, msg);
+
+  // أوامر المشرف تعمل حتى بدون جلسة شركة.
+  const supervisorState = await getState(chatId, env);
+  if (isAdminState(supervisorState.mode)) return handleAdminStateText(chatId, text, supervisorState, env, msg);
+  const supervisorAction = supervisorActionForText(text);
+  if (supervisorAction) return handleSupervisorAction(chatId, supervisorAction, env, msg);
 
   // تسجيل الدخول المعتمد: ملف أوسكار نفسه بامتداد .mzauth فقط.
   if (msg.document) {
@@ -288,7 +311,7 @@ async function start(chatId, env, msg) {
 function startReplyKeyboard() {
   return {
     keyboard: [
-      [{ text:'🔐 تسجيل الدخول' }],
+      [{ text:'🔐 تسجيل الدخول' }, { text:'🛡 المشرف' }],
       [{ text:'ℹ️ طريقة الدخول' }]
     ],
     resize_keyboard: true,
@@ -341,17 +364,14 @@ function cleanEncryptedLoginText(value) {
   return text;
 }
 
-async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) {
+async function loginFromActivationPayload(chatId, rawPayload, env, options = {}) {
   if (!options.statusAlreadySent) await sendMessage(chatId, '⏳ جاري فحص ملف أوسكار والتحقق من الحساب...', loginFileKeyboard());
   try {
-    const opaque = cleanEncryptedLoginText(encryptedText);
-    const rawPayload = await unpackActivationFile(opaque);
     const payload = normalizeActivationPayload(rawPayload);
     const verified = await verifyActivationPayloadStrictWithRetry(payload, 3);
     if (verified?.account) payload.account = { ...(payload.account || {}), ...verified.account };
     await probeOscarDatabaseAfterVerification(payload);
 
-    // ابدأ من آخر حالة حالية حتى لا يرسل البوت الفواتير القديمة بعد أول دخول.
     const [invoiceCursor, purchaseCursor] = await Promise.all([
       remoteStoreMaxRev(payload, 'invoices').catch(()=>-1),
       remoteStoreMaxRev(payload, 'purchases').catch(()=>-1)
@@ -384,9 +404,8 @@ async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) 
       const elapsed = Date.now() - minStartedAt;
       if (elapsed < 2200) await sleep(2200 - elapsed);
     }
-    const verifyText = '';
     await sendMessage(chatId,
-      `✅ <b>تم تسجيل الدخول وربط الحساب</b>\n\n🏢 ${e(payload.companyName || 'الشركة')}\n👤 ${e(payload.account?.name || payload.account?.displayName || 'مستخدم')}\n🛡 ${e(payload.account?.roleName || payload.account?.role || (payload.type === 'company-manager' ? 'مدير الشركة' : 'حساب أوسكار'))}${verifyText}`
+      `✅ <b>تم تسجيل الدخول وربط الحساب</b>\n\n🏢 ${e(payload.companyName || 'الشركة')}\n👤 ${e(payload.account?.name || payload.account?.displayName || 'مستخدم')}\n🛡 ${e(payload.account?.roleName || payload.account?.role || (payload.type === 'company-manager' ? 'مدير الشركة' : 'حساب أوسكار'))}`
     );
     return showMainMenu(chatId, { payload });
   } catch (error) {
@@ -401,11 +420,27 @@ async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) 
   }
 }
 
+async function loginFromEncryptedText(chatId, encryptedText, env, options = {}) {
+  try {
+    const opaque = cleanEncryptedLoginText(encryptedText);
+    const rawPayload = await unpackActivationFile(opaque);
+    return loginFromActivationPayload(chatId, rawPayload, env, options);
+  } catch (error) {
+    const minStartedAt = Number(options.startedAt || 0);
+    if (minStartedAt > 0) {
+      const elapsed = Date.now() - minStartedAt;
+      if (elapsed < 2200) await sleep(2200 - elapsed);
+    }
+    await setState(chatId, 'LOGIN_FILE', {}, env);
+    return sendMessage(chatId, `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\nأعد إرسال ملف الدخول الأصلي <code>.mzauth</code>.`, loginFileKeyboard());
+  }
+}
+
 async function loginFromTelegramDocument(chatId, doc, env) {
   const startedAt = Date.now();
-  const status = await sendMessage(chatId,
+  await sendMessage(chatId,
     '⏳ <b>جاري التحقق من ملف الدخول...</b>\n\n' +
-    'يتم الآن فحص الملف، فك التشفير، مطابقة الشركة، حالة التفعيل، الحساب ونسخة ملف الدخول.\n' +
+    'يتم تنزيل الملف كبايتات مباشرة ثم فك نفس تشفير أوسكار والتحقق من الشركة والحساب.\n' +
     'انتظر حتى يكتمل التحقق.',
     loginFileKeyboard()
   );
@@ -413,21 +448,20 @@ async function loginFromTelegramDocument(chatId, doc, env) {
     const fileName = String(doc?.file_name || '');
     if (!/\.mzauth$/i.test(fileName)) throw new Error('امتداد الملف غير صحيح. المطلوب ملف .mzauth الأصلي.');
     const fileSize = Number(doc?.file_size || 0);
-    if (fileSize && (fileSize < 100 || fileSize > 256 * 1024)) throw new Error('حجم ملف الدخول غير طبيعي. أرسل ملف .mzauth الأصلي من أوسكار.');
+    if (fileSize && (fileSize < 64 || fileSize > 512 * 1024)) throw new Error('حجم ملف الدخول غير طبيعي. أرسل ملف .mzauth الأصلي من أوسكار.');
 
     const file = await telegram('getFile', { file_id: doc.file_id });
     if (!file?.ok || !file.result?.file_path) throw new Error('تعذر تنزيل ملف الدخول من تيليجرام. حاول مرة أخرى.');
     const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${file.result.file_path}`, { cache:'no-store' });
     if (!res.ok) throw new Error('فشل تنزيل ملف الدخول من تيليجرام.');
     const fileBytes = new Uint8Array(await res.arrayBuffer());
-    if (fileBytes.length < 100) throw new Error('ملف الدخول فارغ أو غير مكتمل.');
-    if (fileBytes.length > 256 * 1024) throw new Error('ملف الدخول أكبر من الحجم المتوقع.');
+    if (fileBytes.length < 64) throw new Error('ملف الدخول فارغ أو غير مكتمل.');
+    if (fileBytes.length > 512 * 1024) throw new Error('ملف الدخول أكبر من الحجم المتوقع.');
 
-    const opaque = activationFileAscii(fileBytes);
-    // loginFromEncryptedText هنا دالة داخلية فقط لفك محتوى الملف بعد تنزيله؛ لا يوجد دخول بالنص من المستخدم.
+    const rawPayload = await unpackActivationBytes(fileBytes);
     const elapsed = Date.now() - startedAt;
-    if (elapsed < 900) await sleep(900 - elapsed);
-    return loginFromEncryptedText(chatId, opaque, env, { statusAlreadySent: true, startedAt });
+    if (elapsed < 1100) await sleep(1100 - elapsed);
+    return loginFromActivationPayload(chatId, rawPayload, env, { statusAlreadySent: true, startedAt });
   } catch (error) {
     console.error('LOGIN_FILE_ERROR', error);
     const elapsed = Date.now() - startedAt;
@@ -435,7 +469,7 @@ async function loginFromTelegramDocument(chatId, doc, env) {
     await setState(chatId, 'LOGIN_FILE', {}, env);
     return sendMessage(chatId,
       `❌ <b>تعذر تسجيل الدخول</b>\n\n${e(String(error?.message || error))}\n\n` +
-      'أرسل نفس ملف <code>.mzauth</code> الذي تدخل به إلى برنامج أوسكار بدون تعديل.',
+      'أرسل نفس ملف <code>.mzauth</code> الذي يعمل داخل برنامج أوسكار بدون تعديل.',
       loginFileKeyboard()
     );
   }
@@ -560,6 +594,7 @@ async function handleCallback(chatId, data, env) {
   if (data === 'login_start' || data === 'login_waiting') return askForLoginFile(chatId, env);
   if (data === 'login_help') return showLoginHelp(chatId);
   if (data === 'start_screen') return start(chatId, env, null);
+  if (String(data||'').startsWith('admin:')) return handleSupervisorCallback(chatId, data, env);
   const session = await getSession(chatId, env);
   if (!session) return askForLoginFile(chatId, env);
   const requiredPermission = permissionForCallback(data);
@@ -1315,6 +1350,43 @@ function activationFileAscii(bytes){
   return out.trim();
 }
 
+function normalizeOpaqueCandidate(value){
+  let s=String(value||'').trim().replace(/^\uFEFF/,'');
+  if(!s)return '';
+  s=s.replace(/^```(?:text|txt|base64)?\s*/i,'').replace(/```$/i,'').trim();
+  if((s.startsWith('"')&&s.endsWith('"'))||(s.startsWith("'")&&s.endsWith("'")))s=s.slice(1,-1).trim();
+  s=s.replace(/^mzauth\s*[:=]\s*/i,'');
+  const dataMatch=s.match(/^data:[^,]+,([A-Za-z0-9+/_=-]+)$/i);if(dataMatch)s=dataMatch[1];
+  s=s.replace(/\0/g,'').replace(/\s+/g,'');
+  if(/^[A-Za-z0-9_-]+={0,2}$/.test(s)&&!/[+/]/.test(s))s=s.replace(/-/g,'+').replace(/_/g,'/');
+  while(s.length%4)s+='=';
+  return s;
+}
+
+function opaqueCandidatesFromBytes(bytes){
+  const out=[];const add=v=>{const x=normalizeOpaqueCandidate(v);if(x&&x.length>60&&!out.includes(x))out.push(x)};
+  try{add(activationFileAscii(bytes))}catch(_){}
+  try{add(new TextDecoder('utf-8',{fatal:false}).decode(bytes))}catch(_){}
+  try{add(new TextDecoder('utf-16le',{fatal:false}).decode(bytes))}catch(_){}
+  // بعض مديري الملفات قد يسلمون البايتات الخام بدل نص Base64.
+  if(bytes?.length>90&&bytes[0]===0x6d){try{add(b64(bytes))}catch(_){}}
+  // وإذا كان الملف داخل JSON صغير استخرج أشهر الحقول.
+  for(const c of [...out]){
+    try{const j=JSON.parse(String(c));for(const k of ['opaque','mzauth','data','content','payload'])if(typeof j?.[k]==='string')add(j[k]);}catch(_){}
+  }
+  return out;
+}
+
+async function unpackActivationBytes(bytes){
+  const candidates=opaqueCandidatesFromBytes(bytes);
+  if(!candidates.length)throw new Error('تعذر قراءة محتوى ملف .mzauth. أرسل الملف الأصلي بدون تعديل.');
+  let last=null;
+  for(const candidate of candidates){
+    try{return await unpackActivationFile(candidate)}catch(err){last=err;}
+  }
+  throw new Error(last?.message||'تعذر فك ملف الدخول بنفس تشفير أوسكار.');
+}
+
 async function unpackActivationFile(text){
   // نفس تنسيق oscar-activation-runtime.js في التطبيق المرفق.
   let raw;
@@ -1557,14 +1629,17 @@ async function writeExact(db,path,value,updatedAt=Date.now(),deleted=false){
 function unwrapRecord(v){if(v&&typeof v==='object'&&Object.prototype.hasOwnProperty.call(v,'v'))return v.deleted?null:v.v;return v}
 function parseJson(v){if(typeof v!=='string')return v;try{return JSON.parse(v)}catch(_){return v}}
 
+async function deriveAesKeyRuntime(password,salt,iterations=220000,usages=['decrypt']){
+  const material=await crypto.subtle.importKey('raw',enc.encode(String(password)),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,usages);
+}
 async function deriveAesKeyCompat(password,salt,iterations=220000){
-  const material=await crypto.subtle.importKey('raw',enc.encode(String(password)),'PBKDF2',false,['deriveBits','deriveKey']);
-  try{
-    const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,256);
-    return crypto.subtle.importKey('raw',bits,{name:'AES-GCM'},false,['decrypt']);
-  }catch(firstError){
+  try{return await deriveAesKeyRuntime(password,salt,iterations,['decrypt']);}
+  catch(firstError){
+    const material=await crypto.subtle.importKey('raw',enc.encode(String(password)),'PBKDF2',false,['deriveBits']);
     try{
-      return await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['decrypt']);
+      const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations,hash:'SHA-256'},material,256);
+      return crypto.subtle.importKey('raw',bits,{name:'AES-GCM'},false,['decrypt']);
     }catch(secondError){
       console.error('PBKDF2_ERROR',String(firstError?.message||firstError),String(secondError?.message||secondError));
       throw secondError;
@@ -1573,13 +1648,256 @@ async function deriveAesKeyCompat(password,salt,iterations=220000){
 }
 async function aesDecryptCompat(cipher,password,salt,iv,iterations=220000){
   const key=await deriveAesKeyCompat(password,salt,iterations);
-  const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv,tagLength:128},key,cipher);
+  const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,cipher);
   return dec.decode(plain);
 }
+async function aesEncryptRuntime(text,password,saltBytes=null,iterations=220000){
+  const salt=saltBytes||crypto.getRandomValues(new Uint8Array(16));
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const key=await deriveAesKeyRuntime(password,salt,iterations,['encrypt']);
+  const cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(String(text))));
+  return {salt,iv,cipher};
+}
+function b64(bytes){let out='';const u=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes||[]);for(let i=0;i<u.length;i+=0x8000)out+=String.fromCharCode(...u.subarray(i,i+0x8000));return btoa(out)}
 function unb64(s){
   const clean=String(s||'').replace(/\s+/g,'');
   if(!clean)throw new Error('EMPTY_BASE64');
   return Uint8Array.from(atob(clean),c=>c.charCodeAt(0));
+}
+
+
+// =========================
+// Supervisor + Master Admin
+// =========================
+function isAdminState(mode){return /^ADMIN_/.test(String(mode||''))}
+function supervisorActionForText(text){
+  const map={
+    '🛡 المشرف':'open','🗄 قاعدة الأم':'master','🧱 قواعد الشركات':'databases','➕ قاعدة':'database_add',
+    '🏢 الشركات':'companies','➕ شركة':'company_add','⬅️ خروج المشرف':'exit_admin','🔄 تحديث الإدارة':'refresh_admin'
+  };
+  return map[String(text||'').trim()]||'';
+}
+function supervisorKeyboard(){return{keyboard:[[{text:'🗄 قاعدة الأم'},{text:'🧱 قواعد الشركات'}],[{text:'➕ قاعدة'},{text:'🏢 الشركات'}],[{text:'➕ شركة'},{text:'🔄 تحديث الإدارة'}],[{text:'⬅️ خروج المشرف'}]],resize_keyboard:true,one_time_keyboard:false}}
+async function deleteSensitiveMessage(chatId,msg){try{if(msg?.message_id)await telegram('deleteMessage',{chat_id:String(chatId),message_id:msg.message_id})}catch(_){}}
+
+async function countSupervisors(env){const row=await env.DB.prepare('SELECT COUNT(*) AS c FROM telegram_supervisors WHERE active=1').first();return Number(row?.c||0)}
+async function isSupervisor(chatId,env){const row=await env.DB.prepare('SELECT chat_id FROM telegram_supervisors WHERE chat_id=? AND active=1').bind(String(chatId)).first();return !!row}
+async function registerSupervisor(chatId,name,env){const now=new Date().toISOString();await env.DB.prepare(`INSERT INTO telegram_supervisors(chat_id,display_name,active,created_at,updated_at) VALUES(?,?,1,?,?) ON CONFLICT(chat_id) DO UPDATE SET display_name=excluded.display_name,active=1,updated_at=excluded.updated_at`).bind(String(chatId),String(name||'المشرف'),now,now).run()}
+
+function adminSecret(env){return String(env?.MASTER_SECRET||env?.ADMIN_SECRET||BOT_TOKEN)}
+async function sealLocalSecret(value,env){
+  const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+  const key=await deriveAesKeyRuntime(adminSecret(env),salt,120000,['encrypt']);
+  const cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(String(value||''))));
+  const out=new Uint8Array(28+cipher.length);out.set(salt,0);out.set(iv,16);out.set(cipher,28);return 'TGB1.'+b64(out);
+}
+async function openLocalSecret(value,env){
+  const s=String(value||'');if(!s.startsWith('TGB1.'))throw new Error('إعدادات القاعدة الأم غير صالحة.');
+  const raw=unb64(s.slice(5));if(raw.length<45)throw new Error('إعدادات القاعدة الأم تالفة.');
+  const key=await deriveAesKeyRuntime(adminSecret(env),raw.slice(0,16),120000,['decrypt']);
+  return dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:raw.slice(16,28)},key,raw.slice(28)));
+}
+async function getMasterConfig(env){
+  const row=await env.DB.prepare('SELECT * FROM telegram_master_config WHERE id=1').first();if(!row)return null;
+  const token=await openLocalSecret(row.auth_token_enc,env);
+  return{database:{databaseURL:String(row.database_url||''),authToken:token,table:String(row.table_name||'oscar_rtdb')},adminRootPath:String(row.admin_root_path||'oscar/admin')};
+}
+async function saveMasterConfigToD1(databaseURL,authToken,env){
+  const db={databaseURL:String(databaseURL||'').trim(),authToken:String(authToken||'').trim(),table:'oscar_rtdb'};
+  if(!db.databaseURL||!db.authToken)throw new Error('بيانات القاعدة الأم غير مكتملة.');
+  await pipeline(db,[{sql:'SELECT 1 AS ok',args:[]}],15000);
+  await ensureRemoteSchema(db);
+  const encToken=await sealLocalSecret(db.authToken,env),now=new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO telegram_master_config(id,database_url,auth_token_enc,table_name,admin_root_path,updated_at) VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET database_url=excluded.database_url,auth_token_enc=excluded.auth_token_enc,table_name=excluded.table_name,admin_root_path=excluded.admin_root_path,updated_at=excluded.updated_at`).bind(db.databaseURL,encToken,'oscar_rtdb','oscar/admin',now).run();
+  return{database:db,adminRootPath:'oscar/admin'};
+}
+
+async function openSupervisor(chatId,env,msg){
+  if(await isSupervisor(chatId,env))return showSupervisorMenu(chatId,env);
+  const count=await countSupervisors(env);
+  if(count>0)return sendMessage(chatId,'⛔ هذا الحساب غير مسجل كمشرف على البوت.',startReplyKeyboard());
+  await setState(chatId,'ADMIN_MASTER_URL',{claimSupervisor:true,displayName:msg?.from?.first_name||'المشرف'},env);
+  return sendMessage(chatId,'🛡 <b>تهيئة المشرف لأول مرة</b>\n\nلا يوجد مشرف مسجل بعد.\nأرسل الآن <b>رابط Turso للقاعدة الأم</b> مثل:\n<code>libsql://....turso.io</code>\n\nبعدها سأطلب توكن القاعدة وأختبر الاتصال قبل اعتماد حسابك كمشرف.',{keyboard:[[{text:'🏠 البداية'}]],resize_keyboard:true});
+}
+async function showSupervisorMenu(chatId,env){
+  const cfg=await getMasterConfig(env).catch(()=>null);
+  let counts='';
+  if(cfg){try{const [dbs,cos]=await Promise.all([listMasterRecords(env,'databases'),listMasterRecords(env,'companies')]);counts=`\n\n🧱 القواعد: <b>${dbs.length}</b>\n🏢 الشركات: <b>${cos.length}</b>`}catch(_){} }
+  await setState(chatId,'IDLE',{},env);
+  return sendMessage(chatId,`🛡 <b>لوحة مشرف أوسكار</b>${counts}\n\nمن هنا تدير القاعدة الأم وقواعد الشركات والشركات المسجلة.`,supervisorKeyboard());
+}
+
+async function masterDb(env){const cfg=await getMasterConfig(env);if(!cfg?.database?.databaseURL||!cfg?.database?.authToken)throw new Error('القاعدة الأم غير مضبوطة في البوت.');return cfg.database}
+async function listPrefixDb(db,path){
+  await ensureRemoteSchema(db);const table=tursoTable(db),p=normalizeRemotePath(path),hi=p+'\uffff';
+  const[r]=await pipeline(db,[{sql:`SELECT path,payload,deleted,updated_at FROM ${table} WHERE path>=? AND path<? ORDER BY path`,args:[p,hi]}],60000);
+  return resultRows(r).map(x=>({...x,payload:parseJson(x.payload)}));
+}
+async function listMasterRecords(env,prefix){const cfg=await getMasterConfig(env);if(!cfg)throw new Error('القاعدة الأم غير مضبوطة.');const rows=await listPrefixDb(cfg.database,`${cfg.adminRootPath||'oscar/admin'}/${prefix}`);return rows.filter(r=>!Number(r.deleted)).map(r=>unwrapRecord(r.payload)).filter(Boolean)}
+
+async function sealMasterVault(value,secret){
+  const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+  const key=await deriveAesKeyRuntime(String(secret||''),salt,240000,['encrypt']);
+  const cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(JSON.stringify(value))));
+  const out=new Uint8Array(28+cipher.length);out.set(salt,0);out.set(iv,16);out.set(cipher,28);return 'AMV1.'+b64(out);
+}
+async function openMasterVault(value,secret){
+  const s=String(value||'');if(!s.startsWith('AMV1.'))throw new Error('بيانات قاعدة الشركة المشفرة غير صالحة.');
+  const raw=unb64(s.slice(5));if(raw.length<45)throw new Error('بيانات قاعدة الشركة المشفرة تالفة.');
+  const key=await deriveAesKeyRuntime(String(secret||''),raw.slice(0,16),240000,['decrypt']);
+  const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:raw.slice(16,28)},key,raw.slice(28));return JSON.parse(dec.decode(plain));
+}
+async function getDatabaseCredentialsFromMaster(env,id){
+  const cfg=await getMasterConfig(env),dbs=await listMasterRecords(env,'databases'),row=dbs.find(x=>String(x.id)===String(id));if(!row)throw new Error('قاعدة الشركة غير موجودة.');
+  const raw=await openMasterVault(row.vault,cfg.database.authToken);return{record:row,databaseURL:String(raw.databaseURL||''),authToken:String(raw.authToken||''),readAuthToken:String(raw.readAuthToken||''),table:'oscar_rtdb'};
+}
+
+function uid(prefix){return`${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2,7).toUpperCase()}`}
+function generateCompanyKey(){const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789',part=()=>Array.from({length:4},()=>chars[Math.floor(Math.random()*chars.length)]).join('');return`MZ-${part()}-${part()}`}
+function dateOnly(d=new Date()){return d.toISOString().slice(0,10)}
+function addDaysIso(days){const d=new Date();d.setUTCDate(d.getUTCDate()+Number(days||0));return dateOnly(d)}
+
+async function showMasterInfo(chatId,env){
+  const cfg=await getMasterConfig(env);if(!cfg){await setState(chatId,'ADMIN_MASTER_URL',{claimSupervisor:false},env);return sendMessage(chatId,'🗄 أرسل رابط القاعدة الأم الآن.',supervisorKeyboard())}
+  return sendMessage(chatId,`🗄 <b>القاعدة الأم</b>\n\n🔗 <code>${e(cfg.database.databaseURL)}</code>\n📋 الجدول: <code>${e(cfg.database.table||'oscar_rtdb')}</code>\n📁 المسار: <code>${e(cfg.adminRootPath||'oscar/admin')}</code>\n\nلتغييرها اضغط الزر أدناه.`,{inline_keyboard:[[btn('✏️ تغيير القاعدة الأم','admin:master_change')],[btn('🔙 لوحة المشرف','admin:menu')]]});
+}
+async function showAdminDatabases(chatId,env){
+  const [dbs,companies]=await Promise.all([listMasterRecords(env,'databases'),listMasterRecords(env,'companies')]);
+  const lines=dbs.map((d,i)=>`${i+1}. <b>${e(d.name||d.id)}</b>\n   🆔 <code>${e(d.id)}</code> • شركات: ${companies.filter(c=>String(c.databaseId)===String(d.id)).length}`);
+  return sendMessage(chatId,`🧱 <b>قواعد الشركات</b>\n\n${lines.join('\n\n')||'لا توجد قواعد مسجلة.'}`,supervisorKeyboard());
+}
+async function showAdminCompanies(chatId,env){
+  const companies=(await listMasterRecords(env,'companies')).sort((a,b)=>String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
+  const show=companies.slice(0,30);
+  const lines=show.map((c,i)=>`${i+1}. <b>${e(c.companyName||c.id)}</b> ${c.status==='active'?'✅':'⛔'}\n   🔑 <code>${e(c.companyKey||'')}</code>\n   🧱 ${e(c.databaseName||c.databaseId||'—')} • 👤 ${e(c.manager?.name||'مدير النظام')}\n   📅 ${c.endAt?e(c.endAt):'مدى الحياة'}`);
+  const buttons=show.slice(0,12).map(c=>[btn(`📥 ملف مدير • ${String(c.companyName||'').slice(0,28)}`,`admin:companyfile:${c.id}`),btn(c.status==='active'?'⛔':'✅',`admin:companytoggle:${c.id}`)]);
+  buttons.push([btn('➕ شركة جديدة','admin:company_add')],[btn('🔙 لوحة المشرف','admin:menu')]);
+  return sendMessage(chatId,`🏢 <b>الشركات المسجلة</b>\n\n${lines.join('\n\n')||'لا توجد شركات مسجلة.'}${companies.length>show.length?`\n\n… ويوجد ${companies.length-show.length} شركة إضافية.`:''}`,{inline_keyboard:buttons});
+}
+
+async function handleSupervisorAction(chatId,action,env,msg){
+  if(action==='open')return openSupervisor(chatId,env,msg);
+  if(action==='exit_admin'){await setState(chatId,'IDLE',{},env);return startOrMenu(chatId,env,msg)}
+  if(!(await isSupervisor(chatId,env)))return sendMessage(chatId,'⛔ يجب الدخول كمشرف أولاً.',startReplyKeyboard());
+  if(action==='master')return showMasterInfo(chatId,env);
+  if(action==='databases')return showAdminDatabases(chatId,env);
+  if(action==='companies')return showAdminCompanies(chatId,env);
+  if(action==='refresh_admin')return showSupervisorMenu(chatId,env);
+  if(action==='database_add'){await setState(chatId,'ADMIN_DB_NAME',{},env);return sendMessage(chatId,'➕ <b>إضافة قاعدة شركة</b>\n\nاكتب اسم القاعدة، مثال: <code>قاعدة فلسطين 1</code>.',supervisorKeyboard())}
+  if(action==='company_add'){
+    const dbs=await listMasterRecords(env,'databases');if(!dbs.length)return sendMessage(chatId,'⚠️ أضف قاعدة شركة أولاً قبل إنشاء شركة.',supervisorKeyboard());
+    await setState(chatId,'ADMIN_COMPANY_NAME',{},env);return sendMessage(chatId,'➕ <b>إضافة شركة</b>\n\nاكتب اسم الشركة أو المحل.',supervisorKeyboard());
+  }
+  return showSupervisorMenu(chatId,env);
+}
+
+async function handleAdminStateText(chatId,text,state,env,msg){
+  const value=String(text||'').trim();
+  if(value==='🏠 البداية'||value==='⬅️ خروج المشرف'){await setState(chatId,'IDLE',{},env);return startOrMenu(chatId,env,msg)}
+  if(state.mode==='ADMIN_MASTER_URL'){
+    if(!/^(?:libsql|https?):\/\//i.test(value))return sendMessage(chatId,'اكتب رابط Turso صحيحاً يبدأ بـ <code>libsql://</code>.');
+    await setState(chatId,'ADMIN_MASTER_TOKEN',{...state.data,databaseURL:value},env);return sendMessage(chatId,'🔐 أرسل الآن <b>توكن الكتابة للقاعدة الأم</b>.\nسيتم اختباره ولن أعرضه في الرسائل بعد الحفظ.');
+  }
+  if(state.mode==='ADMIN_MASTER_TOKEN'){
+    await deleteSensitiveMessage(chatId,msg);
+    if(value.length<20)return sendMessage(chatId,'التوكن قصير أو غير صحيح. أرسله كاملاً.');
+    const wait=await sendMessage(chatId,'⏳ جاري اختبار القاعدة الأم وحفظها...');
+    const cfg=await saveMasterConfigToD1(state.data.databaseURL,value,env);
+    if(state.data.claimSupervisor)await registerSupervisor(chatId,state.data.displayName||msg?.from?.first_name||'المشرف',env);
+    await setState(chatId,'IDLE',{},env);return sendMessage(chatId,`✅ تم ربط القاعدة الأم بنجاح.\n🔗 <code>${e(cfg.database.databaseURL)}</code>`,supervisorKeyboard());
+  }
+  if(!(await isSupervisor(chatId,env)))return sendMessage(chatId,'⛔ جلسة المشرف غير متاحة.',startReplyKeyboard());
+  if(state.mode==='ADMIN_DB_NAME'){
+    if(value.length<2)return sendMessage(chatId,'اكتب اسماً واضحاً للقاعدة.');
+    await setState(chatId,'ADMIN_DB_URL',{name:value},env);return sendMessage(chatId,'🔗 أرسل رابط Turso لقاعدة الشركة.');
+  }
+  if(state.mode==='ADMIN_DB_URL'){
+    if(!/^(?:libsql|https?):\/\//i.test(value))return sendMessage(chatId,'رابط القاعدة غير صحيح.');
+    await setState(chatId,'ADMIN_DB_WRITE',{...state.data,databaseURL:value},env);return sendMessage(chatId,'✍️ أرسل <b>توكن الكتابة</b> لقاعدة الشركة.');
+  }
+  if(state.mode==='ADMIN_DB_WRITE'){
+    await deleteSensitiveMessage(chatId,msg);
+    if(value.length<20)return sendMessage(chatId,'توكن الكتابة غير صحيح أو ناقص.');
+    await setState(chatId,'ADMIN_DB_READ',{...state.data,authToken:value},env);return sendMessage(chatId,'👁 أرسل الآن <b>توكن القراءة فقط للعملاء</b>.');
+  }
+  if(state.mode==='ADMIN_DB_READ'){
+    await deleteSensitiveMessage(chatId,msg);
+    if(value.length<20)return sendMessage(chatId,'توكن القراءة فقط غير صحيح أو ناقص.');
+    const cfg=await getMasterConfig(env);if(!cfg)throw new Error('القاعدة الأم غير مضبوطة.');
+    const db={databaseURL:state.data.databaseURL,authToken:state.data.authToken,table:'oscar_rtdb'};
+    await ensureRemoteSchema(db);await pipeline({databaseURL:state.data.databaseURL,authToken:value,table:'oscar_rtdb'},[{sql:'SELECT 1 AS ok',args:[]}],15000);
+    const id=uid('DB'),vault=await sealMasterVault({databaseURL:state.data.databaseURL,authToken:state.data.authToken,readAuthToken:value},cfg.database.authToken),now=new Date().toISOString();
+    const record={id,name:state.data.name,vault,hasCustomerReadToken:true,createdAt:now,updatedAt:now};
+    await writeExact(cfg.database,`${cfg.adminRootPath}/databases/${id}`,record,Date.now(),false);
+    await setState(chatId,'IDLE',{},env);return sendMessage(chatId,`✅ تم إضافة قاعدة <b>${e(record.name)}</b> والتحقق من توكن الكتابة والقراءة.`,supervisorKeyboard());
+  }
+  if(state.mode==='ADMIN_COMPANY_NAME'){
+    if(value.length<2)return sendMessage(chatId,'اكتب اسم الشركة بشكل صحيح.');
+    await setState(chatId,'ADMIN_COMPANY_MANAGER',{companyName:value},env);return sendMessage(chatId,'👤 اكتب اسم مدير الشركة، أو أرسل <code>-</code> لاستخدام "مدير النظام".');
+  }
+  if(state.mode==='ADMIN_COMPANY_MANAGER'){
+    const data={...state.data,managerName:value==='-'?'مدير النظام':value};await setState(chatId,'ADMIN_COMPANY_DB',data,env);
+    const dbs=await listMasterRecords(env,'databases');return sendMessage(chatId,'🧱 اختر القاعدة التي ستتبع لها الشركة:',{inline_keyboard:dbs.slice(0,40).map(d=>[btn(d.name||d.id,`admin:companydb:${d.id}`)]).concat([[btn('🔙 إلغاء','admin:menu')]])});
+  }
+  return showSupervisorMenu(chatId,env);
+}
+
+async function handleSupervisorCallback(chatId,data,env){
+  if(!(await isSupervisor(chatId,env)))return sendMessage(chatId,'⛔ غير مصرح لهذا الحساب بالدخول إلى لوحة المشرف.',startReplyKeyboard());
+  if(data==='admin:menu')return showSupervisorMenu(chatId,env);
+  if(data==='admin:master_change'){await setState(chatId,'ADMIN_MASTER_URL',{claimSupervisor:false},env);return sendMessage(chatId,'✏️ أرسل رابط القاعدة الأم الجديد.',supervisorKeyboard())}
+  if(data==='admin:company_add')return handleSupervisorAction(chatId,'company_add',env,null);
+  if(data.startsWith('admin:companydb:')){
+    const id=data.slice('admin:companydb:'.length),state=await getState(chatId,env);if(state.mode!=='ADMIN_COMPANY_DB')return showSupervisorMenu(chatId,env);
+    const dbs=await listMasterRecords(env,'databases'),d=dbs.find(x=>String(x.id)===String(id));if(!d)return sendMessage(chatId,'قاعدة الشركة غير موجودة.',supervisorKeyboard());
+    await setState(chatId,'ADMIN_COMPANY_PLAN',{...state.data,databaseId:d.id,databaseName:d.name},env);
+    return sendMessage(chatId,'📅 اختر مدة الشركة:',{inline_keyboard:[[btn('♾ مدى الحياة','admin:companyplan:lifetime')],[btn('30 يوم','admin:companyplan:30')],[btn('سنة','admin:companyplan:365')],[btn('🔙 إلغاء','admin:menu')]]});
+  }
+  if(data.startsWith('admin:companyplan:')){
+    const planValue=data.slice('admin:companyplan:'.length),state=await getState(chatId,env);if(state.mode!=='ADMIN_COMPANY_PLAN')return showSupervisorMenu(chatId,env);
+    const company=await createCompanyFromAdmin(env,state.data,planValue);await setState(chatId,'IDLE',{},env);
+    await sendMessage(chatId,`✅ <b>تم إنشاء الشركة</b>\n\n🏢 ${e(company.companyName)}\n🔑 <code>${e(company.companyKey)}</code>\n🧱 ${e(company.databaseName)}\n👤 ${e(company.manager?.name||'مدير النظام')}\n📅 ${company.endAt?e(company.endAt):'مدى الحياة'}\n\nتم نشر التفعيل داخل قاعدة الشركة.`,supervisorKeyboard());
+    return sendManagerFile(chatId,env,company.id,false);
+  }
+  if(data.startsWith('admin:companyfile:'))return sendManagerFile(chatId,env,data.slice('admin:companyfile:'.length),false);
+  if(data.startsWith('admin:companytoggle:')){
+    const id=data.slice('admin:companytoggle:'.length),companies=await listMasterRecords(env,'companies'),c=companies.find(x=>String(x.id)===String(id));if(!c)return sendMessage(chatId,'الشركة غير موجودة.',supervisorKeyboard());
+    c.status=c.status==='active'?'stopped':'active';await publishCompanyFromAdmin(env,c);await saveCompanyToMaster(env,c);return showAdminCompanies(chatId,env);
+  }
+  return showSupervisorMenu(chatId,env);
+}
+
+async function createCompanyFromAdmin(env,data,planValue){
+  const creds=await getDatabaseCredentialsFromMaster(env,data.databaseId),now=new Date().toISOString(),id=uid('CMP');
+  const manager={id:uid('MGR'),role:'مدير النظام',system:true,permissions:['*'],createdAt:now,authVersion:uid('AUTH'),name:data.managerName||'مدير النظام',displayName:data.managerName||'مدير النظام',active:true};
+  const endAt=planValue==='lifetime'?'':addDaysIso(Number(planValue)||365),company={id,companyName:data.companyName,companyKey:generateCompanyKey(),databaseId:data.databaseId,databaseName:creds.record.name,plan:planValue==='lifetime'?'lifetime':'pro',status:'active',startAt:dateOnly(),endAt,manager,createdAt:now,updatedAt:now};
+  await publishCompanyFromAdmin(env,company);await saveCompanyToMaster(env,company);return company;
+}
+async function saveCompanyToMaster(env,company){const cfg=await getMasterConfig(env);company.updatedAt=new Date().toISOString();await writeExact(cfg.database,`${cfg.adminRootPath}/companies/${company.id}`,company,Date.now(),false);return company}
+async function publishCompanyFromAdmin(env,company){
+  const creds=await getDatabaseCredentialsFromMaster(env,company.databaseId),db={databaseURL:creds.databaseURL,authToken:creds.authToken,table:'oscar_rtdb'};
+  const access={companyId:company.id,tenantId:company.id,companyName:company.companyName,companyKey:company.companyKey,status:company.status,plan:company.plan,startAt:company.startAt,endAt:company.endAt||'',manager:company.manager,companyCreatedAt:company.createdAt||'',dataNamespaceVersion:2,customerPortalEnabled:!!creds.readAuthToken,updatedAt:Date.now()};
+  await writeExact(db,`oscar/companies/${encodeURIComponent(company.id)}/access/company`,access,Date.now(),false);return db;
+}
+
+async function packActivationPayload(payload){
+  const activationKey=String(payload?.activationKey||'').trim();if(!activationKey)throw new Error('مفتاح الشركة غير موجود.');
+  const keySalt=crypto.getRandomValues(new Uint8Array(16)),wrapped=await aesEncryptRuntime(activationKey,ACTIVATION_WRAP_KEY,keySalt,220000),keyBlob=new Uint8Array(12+wrapped.cipher.length);keyBlob.set(wrapped.iv,0);keyBlob.set(wrapped.cipher,12);
+  const payloadSalt=crypto.getRandomValues(new Uint8Array(16)),payloadIv=crypto.getRandomValues(new Uint8Array(12)),key=await deriveAesKeyRuntime(activationKey,payloadSalt,220000,['encrypt']);
+  const cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:payloadIv},key,enc.encode(JSON.stringify({...payload,app:APP_TAG}))));
+  const out=new Uint8Array(1+16+2+keyBlob.length+16+12+cipher.length);let o=0;out[o++]=0x6d;out.set(keySalt,o);o+=16;out[o++]=(keyBlob.length>>8)&255;out[o++]=keyBlob.length&255;out.set(keyBlob,o);o+=keyBlob.length;out.set(payloadSalt,o);o+=16;out.set(payloadIv,o);o+=12;out.set(cipher,o);return b64(out);
+}
+async function sendTelegramDocument(chatId,filename,text,caption=''){
+  const fd=new FormData();fd.append('chat_id',String(chatId));fd.append('document',new Blob([String(text||'')],{type:'application/octet-stream'}),String(filename||'Oscar-login.mzauth'));if(caption)fd.append('caption',String(caption).slice(0,900));
+  const res=await fetch(`${TG_API}/sendDocument`,{method:'POST',body:fd});let data=null;try{data=await res.json()}catch(_){data={ok:false,description:'Invalid Telegram response'}}if(!res.ok||!data?.ok)throw new Error(data?.description||`Telegram HTTP ${res.status}`);return data;
+}
+async function sendManagerFile(chatId,env,companyId,rotate=false){
+  const companies=await listMasterRecords(env,'companies'),company=companies.find(x=>String(x.id)===String(companyId));if(!company)throw new Error('الشركة غير موجودة.');
+  if(rotate){company.manager={...company.manager,authVersion:uid('AUTH'),updatedAt:new Date().toISOString()};await publishCompanyFromAdmin(env,company);await saveCompanyToMaster(env,company)}
+  const creds=await getDatabaseCredentialsFromMaster(env,company.databaseId),payload={type:'company-manager',activationKey:company.companyKey,fileId:`manager_${company.manager.id}_${company.manager.authVersion}`,companyId:company.id,tenantId:company.id,companyKey:company.companyKey,companyName:company.companyName,status:company.status,plan:company.plan,startAt:company.startAt,expiresAt:company.endAt||'',companyCreatedAt:company.createdAt||'',dataNamespaceVersion:2,database:{databaseURL:creds.databaseURL,authToken:creds.authToken,table:'oscar_rtdb'},customerDatabase:{databaseURL:creds.databaseURL,authToken:creds.readAuthToken,table:'oscar_rtdb'},rootPath:'oscar/companies',account:{...company.manager,branchId:'BR-MAIN',permissions:[]},app:APP_TAG};
+  const opaque=await packActivationPayload(payload),safeName=String(company.companyName||'Oscar').replace(/[\\/:*?"<>|]+/g,'_');
+  await sendTelegramDocument(chatId,`${safeName}-مدير.mzauth`,opaque,`ملف دخول مدير ${company.companyName}`);
+  return sendMessage(chatId,'📥 تم إنشاء وإرسال ملف المدير بنفس تنسيق أوسكار <code>.mzauth</code>.',supervisorKeyboard());
 }
 
 async function searchProducts(payload,text){const q=norm(text);const all=(await readStore(payload,'products')).filter(x=>!x.deletedAt);return all.filter(p=>norm(p.name).includes(q)||norm(p.internalCode||p.sku).includes(q)||(p.units||[]).some(u=>(u.barcodes||[]).some(b=>String(b).includes(text)))).slice(0,30)}
