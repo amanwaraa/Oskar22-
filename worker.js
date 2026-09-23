@@ -1,5 +1,5 @@
 const DEFAULT_BOT_TOKEN = "8743553964:AAFdDUy2isOSdgvc50ltCDrSVvlK9dOSu2U";
-const BOT_VERSION = '5.1.0-oscar-accounting-saas-visible';
+const BOT_VERSION = '5.2.0-oscar-accounting-force-ui';
 const CASHIER_PRODUCT_ID = 'saas_cashier_bot';
 const MASTER_TURSO_URL = 'libsql://mezan-homworkhhh76-rgb.aws-ap-northeast-1.turso.io';
 const DEFAULT_MASTER_TURSO_TOKEN = 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgyMzU2OTIsImlkIjoiMDFhMDViMjctMWMwMS03YWNiLTlkZDUtNzc0YjBmZjhjMDEzIiwia2lkIjoicVgzS01DZ0pwQnp3eGo1Tzl2SHhaWUJGem9sTWFsa24tTU5JOTRlMTl6YyIsInJpZCI6IjVkNjRiOWQxLTVmOTAtNGVhNC04N2NkLTY4MGJjYjUzZGViMyJ9.UCbYQXjam0ax427SR6oBjy-vtjGl2XCVoBFIa6CSt-M4zhkTldObEcfTonAB3rVxx2T0KJun8z9C2DzhK0zsDA';
@@ -68,6 +68,7 @@ async function setupWebhook(origin, env){
     {command:'orders',description:'طلباتي'},
     {command:'cashier',description:'فتح أوسكار المحاسبي'},
     {command:'accounting',description:'برنامج أوسكار المحاسبي'},
+    {command:'version',description:'إظهار إصدار البوت'},
     {command:'admin',description:'لوحة الإدارة'},
   ]}) : {ok:false};
   return {webhookUrl,bot,webhook,commands};
@@ -254,7 +255,7 @@ async function ensureDb(env){
   await env.DB.prepare(`INSERT INTO store_products(id,name,description,price,currency,photo_file_id,delivery_text,active,sort_order,created_at,updated_at)
     VALUES(?,?,?,?,?,NULL,?,1,-100,?,?)
     ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,price=excluded.price,currency=excluded.currency,delivery_text=excluded.delivery_text,active=1,sort_order=-100,updated_at=excluded.updated_at`)
-    .bind(CASHIER_PRODUCT_ID,'أوسكار المحاسبي — Telegram ERP/POS','برنامج محاسبة وتشغيل كامل داخل تيليجرام: كاشير ومبيعات ومشتريات ومخزون وأصناف وعملاء وموردون وحسابات وصندوق وسندات قبض وصرف ومصروفات وتقارير. تجربة مجانية 24 ساعة، وبعدها اشتراك بالمدة والسعر الذي تحدده الإدارة.',0,'حسب الخطة','أنشئ حسابك وابدأ تجربة أوسكار المحاسبي لمدة 24 ساعة.',t,t).run();
+    .bind(CASHIER_PRODUCT_ID,'🧮 أوسكار المحاسبي — كاشير وERP داخل تيليجرام','برنامج محاسبة وتشغيل كامل داخل تيليجرام: كاشير ومبيعات ومشتريات ومخزون وأصناف وعملاء وموردون وحسابات وصندوق وسندات قبض وصرف ومصروفات وتقارير. تجربة مجانية 24 ساعة، وبعدها اشتراك بالمدة والسعر الذي تحدده الإدارة.',0,'حسب الخطة','أنشئ حسابك وابدأ تجربة أوسكار المحاسبي لمدة 24 ساعة.',t,t).run();
   await env.DB.prepare(`INSERT OR IGNORE INTO saas_plans(id,name,days,price,currency,active,sort_order,created_at,updated_at) VALUES('plan_month','اشتراك شهر',30,0,'₪',1,10,?,?)`).bind(t,t).run();
   await env.DB.prepare(`INSERT OR IGNORE INTO saas_plans(id,name,days,price,currency,active,sort_order,created_at,updated_at) VALUES('plan_year','اشتراك سنة',365,0,'₪',1,20,?,?)`).bind(t,t).run();
 }
@@ -306,6 +307,7 @@ async function processUpdate(update,env){
   const admin=await isAdmin(env,chatId,msg.from);
   const text=String(msg.text||'').trim();
 
+  if(text==='/version') return sendMessage(env,chatId,`✅ الإصدار العامل الآن: <code>${BOT_VERSION}</code>`,admin?adminKeyboard():userKeyboard());
   if(text==='/start'||text==='🏠 الرئيسية') return showHome(env,chatId,msg.from,admin);
   if(text==='🛍 واجهة المتجر') return showStorefront(env,chatId,msg.from);
   if(text==='/shop'||text==='🛍 تصفح البرامج') return showProducts(env,chatId,0,admin);
@@ -372,12 +374,16 @@ async function showStorefront(env,chatId,from){
 <b>${e(cfg.store_name)}</b>
 ${e(cfg.welcome_text)}
 
-🧮 <b>أوسكار المحاسبي</b> متاح الآن: تجربة مجانية 24 ساعة ثم اشتراك بالمدة التي تختارها.
+🧮 <b>أوسكار المحاسبي</b>
+كاشير + مبيعات + مشتريات + مخزون + عملاء + موردين + حسابات + صندوق + سندات + مصروفات + تقارير.
 
-اختر من الأزرار أسفل الشاشة.`;
+🎁 تجربة مجانية 24 ساعة ثم اشتراك بالمدة والسعر الذي تحدده الإدارة.
+
+<code>${BOT_VERSION}</code>`;
+  // Always push a fresh reply keyboard so an old Telegram keyboard cannot remain cached on screen.
   if(cfg.banner_file_id){
-    await sendPhoto(env,chatId,cfg.banner_file_id,text,ik([[{text:'فتح أوسكار المحاسبي',callback_data:'saas:landing'}],[{text:'تصفح البرامج',callback_data:'shop:0'}],[{text:'الدعم',url:`https://t.me/${cleanUsername(cfg.support_username||DEFAULT_ADMIN_USERNAME)}`}]]));
-    return sendMessage(env,chatId,'⌨️ القائمة الرئيسية:',userKeyboard());
+    await sendPhoto(env,chatId,cfg.banner_file_id,text,ik([[{text:'🧮 فتح أوسكار المحاسبي',callback_data:'saas:landing'}],[{text:'🛍 تصفح البرامج',callback_data:'shop:0'}],[{text:'☎️ الدعم',url:`https://t.me/${cleanUsername(cfg.support_username||DEFAULT_ADMIN_USERNAME)}`}]]));
+    return sendMessage(env,chatId,'🧮 <b>أوسكار المحاسبي جاهز</b> — اضغط الزر أسفل الشاشة لبدء تجربة 24 ساعة أو تسجيل الدخول.',userKeyboard());
   }
   return sendMessage(env,chatId,text,userKeyboard());
 }
